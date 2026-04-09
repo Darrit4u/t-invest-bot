@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import random
+import contextlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -209,8 +211,34 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                 )
                 reconnect_attempt = 0
                 had_disconnect = False
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as exc:
+                if stop_event.is_set():
+                    raise
+
+                self._logger.warning(
+                    "T-Invest stream cancelled unexpectedly (attempt #%d): %s",
+                    reconnect_attempt,
+                    exc,
+                )
+                had_disconnect = True
+                await self._emit_status(
+                    "disconnect",
+                    {
+                        "mode": "t_invest",
+                        "attempt": reconnect_attempt,
+                        "error": "stream_cancelled",
+                    },
+                )
+                self._logger.warning(
+                    "Reconnect scheduled in %.1f seconds", self._reconnect_delay_seconds
+                )
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=self._reconnect_delay_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    continue
             except Exception as exc:
                 self._logger.exception("T-Invest stream error: %s", exc)
                 had_disconnect = True
@@ -243,44 +271,42 @@ class TInvestMarketDataClient(BaseMarketDataClient):
         sdk = _load_tinvest_sdk()
         if sdk is None:
             raise RuntimeError(
-                "T-Invest SDK is not available. Install it as described in requirements.txt"
+                "T-Invest SDK is not available. Install package 't-tech-investments' "
+                "and ensure import 't_tech.invest' works in the current Python environment."
             )
 
         async_client = sdk["AsyncClient"]
-        candle_interval = sdk["CandleInterval"]
-        market_data_request = sdk["MarketDataRequest"]
-        subscribe_candles_request = sdk["SubscribeCandlesRequest"]
         candle_instrument = sdk["CandleInstrument"]
-        subscription_action = sdk["SubscriptionAction"]
+        subscription_interval = sdk["SubscriptionInterval"]
 
         instruments_for_subscribe = []
+        uid_to_symbol: dict[str, str] = {}
+        figi_to_symbol: dict[str, str] = {}
         for instrument in self._instruments:
-            figi = instrument.figi
-            if not figi:
+            instrument_id = (instrument.uid or "").strip() or (instrument.figi or "").strip()
+            if not instrument_id:
                 self._logger.warning(
-                    "Instrument %s has no FIGI in config and will be skipped for live stream",
+                    "Instrument %s has no UID/FIGI in config and will be skipped for live stream",
                     instrument.symbol,
                 )
                 continue
 
+            figi = instrument.figi
+            uid = instrument.uid
+
             instruments_for_subscribe.append(
-                candle_instrument(figi=figi, interval=_map_timeframe(self._timeframe, candle_interval))
+                candle_instrument(
+                    instrument_id=instrument_id,
+                    interval=_map_timeframe(self._timeframe, subscription_interval),
+                )
             )
+            if uid:
+                uid_to_symbol[uid] = instrument.symbol
+            if figi:
+                figi_to_symbol[figi] = instrument.symbol
 
         if not instruments_for_subscribe:
-            raise RuntimeError("No valid FIGI found for live stream subscription")
-
-        subscribe_request = market_data_request(
-            subscribe_candles_request=subscribe_candles_request(
-                waiting_close=False,
-                subscription_action=subscription_action.SUBSCRIPTION_ACTION_SUBSCRIBE,
-                instruments=instruments_for_subscribe,
-            )
-        )
-
-        figi_to_symbol = {
-            item.figi: item.symbol for item in self._instruments if item.figi
-        }
+            raise RuntimeError("No valid UID/FIGI found for live stream subscription")
 
         async with async_client(self._token) as client:
             await self._emit_status(
@@ -291,52 +317,69 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                     "recovered": recovered,
                 },
             )
-            stream = client.market_data_stream.market_data_stream([subscribe_request])
-            async for packet in stream:
+            stream = client.create_market_data_stream()
+            stream.candles.waiting_close(False).subscribe(instruments_for_subscribe)
+
+            stop_waiter = asyncio.create_task(stop_event.wait(), name="market-data-stop-waiter")
+            try:
+                async for packet in stream:
+                    if stop_waiter.done():
+                        stream.stop()
+                        return
+
+                    candle = getattr(packet, "candle", None)
+                    if candle is None:
+                        continue
+
+                    symbol = uid_to_symbol.get(getattr(candle, "instrument_uid", ""))
+                    if symbol is None:
+                        symbol = figi_to_symbol.get(getattr(candle, "figi", ""))
+                    if symbol is None:
+                        self._logger.debug("Received candle for unknown instrument id, skipping")
+                        continue
+
+                    try:
+                        normalized = Candle.validated(
+                            dt=getattr(candle, "time"),
+                            open_=_quotation_to_float(getattr(candle, "open")),
+                            high=_quotation_to_float(getattr(candle, "high")),
+                            low=_quotation_to_float(getattr(candle, "low")),
+                            close=_quotation_to_float(getattr(candle, "close")),
+                            volume=float(getattr(candle, "volume", 0.0)),
+                            instrument=symbol,
+                            timeframe=self._timeframe,
+                        )
+                    except CandleValidationError as exc:
+                        self._logger.error("Invalid candle received from stream: %s", exc)
+                        continue
+
+                    await on_candle(normalized)
+            except asyncio.CancelledError:
                 if stop_event.is_set():
-                    return
-
-                candle = getattr(packet, "candle", None)
-                if candle is None:
-                    continue
-
-                symbol = figi_to_symbol.get(getattr(candle, "figi", ""))
-                if symbol is None:
-                    self._logger.debug("Received candle for unknown FIGI, skipping")
-                    continue
-
-                try:
-                    normalized = Candle.validated(
-                        dt=getattr(candle, "time"),
-                        open_=_quotation_to_float(getattr(candle, "open")),
-                        high=_quotation_to_float(getattr(candle, "high")),
-                        low=_quotation_to_float(getattr(candle, "low")),
-                        close=_quotation_to_float(getattr(candle, "close")),
-                        volume=float(getattr(candle, "volume", 0.0)),
-                        instrument=symbol,
-                        timeframe=self._timeframe,
-                    )
-                except CandleValidationError as exc:
-                    self._logger.error("Invalid candle received from stream: %s", exc)
-                    continue
-
-                await on_candle(normalized)
+                    raise
+                # Stream-level cancellation is treated as disconnect and handled by caller.
+                raise
+            finally:
+                stream.stop()
+                stop_waiter.cancel()
+                with contextlib.suppress(Exception):
+                    await stop_waiter
 
 
-def _map_timeframe(timeframe: str, candle_interval_cls: Any) -> Any:
+def _map_timeframe(timeframe: str, subscription_interval_cls: Any) -> Any:
     normalized = timeframe.lower().strip()
     mapping = {
-        "1min": "CANDLE_INTERVAL_1_MIN",
-        "2min": "CANDLE_INTERVAL_2_MIN",
-        "3min": "CANDLE_INTERVAL_3_MIN",
-        "5min": "CANDLE_INTERVAL_5_MIN",
-        "10min": "CANDLE_INTERVAL_10_MIN",
-        "15min": "CANDLE_INTERVAL_15_MIN",
-        "30min": "CANDLE_INTERVAL_30_MIN",
-        "1hour": "CANDLE_INTERVAL_HOUR",
+        "1min": "SUBSCRIPTION_INTERVAL_ONE_MINUTE",
+        "2min": "SUBSCRIPTION_INTERVAL_2_MIN",
+        "3min": "SUBSCRIPTION_INTERVAL_3_MIN",
+        "5min": "SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
+        "10min": "SUBSCRIPTION_INTERVAL_10_MIN",
+        "15min": "SUBSCRIPTION_INTERVAL_FIFTEEN_MINUTES",
+        "30min": "SUBSCRIPTION_INTERVAL_30_MIN",
+        "1hour": "SUBSCRIPTION_INTERVAL_ONE_HOUR",
     }
-    attr_name = mapping.get(normalized, "CANDLE_INTERVAL_1_MIN")
-    return getattr(candle_interval_cls, attr_name)
+    attr_name = mapping.get(normalized, "SUBSCRIPTION_INTERVAL_ONE_MINUTE")
+    return getattr(subscription_interval_cls, attr_name)
 
 
 def _quotation_to_float(value: Any) -> float:
@@ -359,32 +402,21 @@ def _quotation_to_float(value: Any) -> float:
 
 
 def _load_tinvest_sdk() -> dict[str, Any] | None:
-    """Try importing known T-Invest SDK namespaces."""
+    """Load supported T-Invest SDK namespace."""
 
-    providers = [
-        "tinkoff.invest",
-        "tbank.invest",
-        "invest",
+    try:
+        module = importlib.import_module("t_tech.invest")
+    except ImportError:
+        return None
+
+    required = [
+        "AsyncClient",
+        "SubscriptionInterval",
+        "CandleInstrument",
     ]
 
-    for module_name in providers:
-        try:
-            module = __import__(module_name, fromlist=["dummy"])
-        except ImportError:
-            continue
-
-        required = [
-            "AsyncClient",
-            "CandleInterval",
-            "MarketDataRequest",
-            "SubscribeCandlesRequest",
-            "CandleInstrument",
-            "SubscriptionAction",
-        ]
-
-        if all(hasattr(module, attr) for attr in required):
-            return {attr: getattr(module, attr) for attr in required}
-
+    if all(hasattr(module, attr) for attr in required):
+        return {attr: getattr(module, attr) for attr in required}
     return None
 
 

@@ -377,6 +377,16 @@ async def run() -> int:
     done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
     for finished in done:
+        if finished.cancelled():
+            LOGGER.warning("Task %s was cancelled", finished.get_name())
+            if not stop_event.is_set():
+                await notifier.notify_critical(
+                    "Runtime task cancelled",
+                    f"task={finished.get_name()} was cancelled unexpectedly",
+                )
+                stop_event.set()
+            continue
+
         exc = finished.exception()
         if exc:
             LOGGER.error(

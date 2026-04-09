@@ -82,6 +82,47 @@ python main.py
 python main.py --run-seconds 60
 ```
 
+## Утилита автозаполнения `instruments.yaml`
+
+Скрипт `scripts/fill_instruments_meta.py` автоматически обновляет поля:
+- `figi`
+- `uid`
+- `tick_size`
+- `tick_value`
+
+Источник данных: SDK `t_tech.invest` (`client.instruments.futures(...)` + `min_price_increment` / `min_price_increment_amount`).
+
+### Что нужно перед запуском
+
+- В `config/instruments.yaml` должны быть заполнены `ticker` и `class_code`.
+- В `.env` должен быть валидный `INVEST_TOKEN` (или передайте `--token`).
+
+### Dry run (без записи файла)
+
+```powershell
+python scripts/fill_instruments_meta.py --dry-run
+```
+
+### Обычный запуск (с записью в `config/instruments.yaml`)
+
+```powershell
+python scripts/fill_instruments_meta.py
+```
+
+### Полезные параметры
+
+```powershell
+python scripts/fill_instruments_meta.py --help
+```
+
+Параметры:
+- `--config` путь к `instruments.yaml` (по умолчанию `config/instruments.yaml`)
+- `--env-file` путь к `.env` (по умолчанию `.env`)
+- `--token` токен напрямую (приоритет выше `.env`)
+- `--dry-run` только показать изменения, без записи
+
+Примечание: для фьючерсов `tick_value` (`min_price_increment_amount`) может меняться в течение дня.
+
 ## Режимы работы
 
 - `demo` (по умолчанию): синтетические свечи, токен T-Invest не нужен.
