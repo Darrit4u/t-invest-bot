@@ -87,6 +87,11 @@ class ConfigLoader:
         default_timeframe = str(instruments_raw.get("default_timeframe", "1min"))
         if not default_timeframe:
             raise ConfigError("default_timeframe must not be empty")
+        if default_timeframe.lower() not in _SUPPORTED_TIMEFRAMES:
+            raise ConfigError(
+                "default_timeframe must be one of: "
+                + ", ".join(sorted(_SUPPORTED_TIMEFRAMES))
+            )
 
         session_rules = self._parse_sessions(instruments_raw.get("session_rules", {}))
         instruments = self._parse_instruments(instruments_raw.get("instruments", {}), session_rules)
@@ -278,3 +283,17 @@ class ConfigLoader:
             return None
         normalized = str(value).strip()
         return normalized or None
+
+
+_SUPPORTED_TIMEFRAMES = frozenset(
+    {
+        "1min",
+        "2min",
+        "3min",
+        "5min",
+        "10min",
+        "15min",
+        "30min",
+        "1hour",
+    }
+)

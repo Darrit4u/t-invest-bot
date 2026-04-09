@@ -134,7 +134,7 @@ class TradeSimulator:
             net_pnl=0.0,
             r_multiple=0.0,
             exit_reason=None,
-            metadata=dict(signal.metadata),
+            metadata=dict(signal.metadata) | {"entry_mode": signal.entry_mode},
         )
         self._trades[trade_id] = trade
         self._open_by_instrument.setdefault(trade.instrument, set()).add(trade_id)
@@ -495,6 +495,10 @@ class TradeSimulator:
 
     @staticmethod
     def _entry_fill_price(*, trade: SimulatedTrade, candle: Candle) -> float | None:
+        entry_mode = str(trade.metadata.get("entry_mode", "")).strip().upper()
+        if entry_mode == "NEXT_BAR_OPEN":
+            return candle.open
+
         if candle.low <= trade.entry <= candle.high:
             return trade.entry
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -52,7 +53,15 @@ class SignalEngine:
         self._blackout_filter = blackout_filter
         self._strategies = self._build_strategies(params)
         self._max_eval_candles = int(params.get("max_eval_candles", 350))
-        self._accepted_keys: set[tuple[str, str, str]] = set()
+        signal_engine_cfg = params.get("signal_engine", {})
+        if not isinstance(signal_engine_cfg, dict):
+            signal_engine_cfg = {}
+        self._dedupe_history_limit = max(
+            1000,
+            int(signal_engine_cfg.get("dedupe_history_limit", 20_000)),
+        )
+        self._accepted_keys_set: set[tuple[str, str, str]] = set()
+        self._accepted_keys_queue: deque[tuple[str, str, str]] = deque()
 
     def process_candle(self, *, instrument: str, timeframe: str) -> EngineResult:
         if instrument not in self._registry:
@@ -108,11 +117,15 @@ class SignalEngine:
                 raw.strategy,
                 raw.timestamp.isoformat(),
             )
-            if dedupe_key in self._accepted_keys:
+            if dedupe_key in self._accepted_keys_set:
                 rejected_reasons.append(f"{strategy_name}:duplicate")
                 continue
 
-            self._accepted_keys.add(dedupe_key)
+            self._accepted_keys_set.add(dedupe_key)
+            self._accepted_keys_queue.append(dedupe_key)
+            if len(self._accepted_keys_queue) > self._dedupe_history_limit:
+                oldest = self._accepted_keys_queue.popleft()
+                self._accepted_keys_set.discard(oldest)
             accepted.append(raw)
 
         return EngineResult(

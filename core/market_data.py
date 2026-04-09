@@ -409,7 +409,12 @@ def _map_timeframe(timeframe: str, subscription_interval_cls: Any) -> Any:
         "30min": "SUBSCRIPTION_INTERVAL_30_MIN",
         "1hour": "SUBSCRIPTION_INTERVAL_ONE_HOUR",
     }
-    attr_name = mapping.get(normalized, "SUBSCRIPTION_INTERVAL_ONE_MINUTE")
+    attr_name = mapping.get(normalized)
+    if attr_name is None:
+        raise ValueError(
+            "Unsupported timeframe "
+            f"{timeframe!r}. Supported values: {', '.join(sorted(mapping.keys()))}"
+        )
     return getattr(subscription_interval_cls, attr_name)
 
 
