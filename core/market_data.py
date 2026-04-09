@@ -277,6 +277,12 @@ class TInvestMarketDataClient(BaseMarketDataClient):
 
         async_client = sdk["AsyncClient"]
         candle_instrument = sdk["CandleInstrument"]
+        grpc_helpers = sdk["grpc_helpers"]
+        market_data_pb2 = sdk["market_data_pb2"]
+        market_data_response = sdk["MarketDataResponse"]
+        market_data_server_side_stream_request = sdk["MarketDataServerSideStreamRequest"]
+        subscribe_candles_request = sdk["SubscribeCandlesRequest"]
+        subscription_action = sdk["SubscriptionAction"]
         subscription_interval = sdk["SubscriptionInterval"]
 
         instruments_for_subscribe = []
@@ -317,16 +323,27 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                     "recovered": recovered,
                 },
             )
-            stream = client.create_market_data_stream()
-            stream.candles.waiting_close(False).subscribe(instruments_for_subscribe)
-
-            stop_waiter = asyncio.create_task(stop_event.wait(), name="market-data-stop-waiter")
-            try:
-                async for packet in stream:
-                    if stop_waiter.done():
-                        stream.stop()
-                        return
-
+            async def _read_stream() -> None:
+                request = market_data_server_side_stream_request(
+                    subscribe_candles_request=subscribe_candles_request(
+                        subscription_action=subscription_action.SUBSCRIPTION_ACTION_SUBSCRIBE,
+                        instruments=instruments_for_subscribe,
+                        waiting_close=False,
+                    )
+                )
+                protobuf_request = grpc_helpers.dataclass_to_protobuff(
+                    request,
+                    market_data_pb2.MarketDataServerSideStreamRequest(),
+                )
+                stream = client.market_data_stream.stub.MarketDataServerSideStream(
+                    request=protobuf_request,
+                    metadata=client.market_data_stream.metadata,
+                )
+                async for protobuf_response in stream:
+                    packet = grpc_helpers.protobuf_to_dataclass(
+                        protobuf_response,
+                        market_data_response,
+                    )
                     candle = getattr(packet, "candle", None)
                     if candle is None:
                         continue
@@ -354,16 +371,30 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                         continue
 
                     await on_candle(normalized)
-            except asyncio.CancelledError:
-                if stop_event.is_set():
-                    raise
-                # Stream-level cancellation is treated as disconnect and handled by caller.
-                raise
+
+            read_task = asyncio.create_task(_read_stream(), name="market-data-read-loop")
+            stop_waiter = asyncio.create_task(stop_event.wait(), name="market-data-stop-waiter")
+            try:
+                done, pending = await asyncio.wait(
+                    {read_task, stop_waiter},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if stop_waiter in done:
+                    read_task.cancel()
+                    with contextlib.suppress(Exception):
+                        await read_task
+                    return
+
+                if read_task in done:
+                    exc = read_task.exception()
+                    if exc is not None:
+                        raise exc
+                    return
             finally:
-                stream.stop()
-                stop_waiter.cancel()
-                with contextlib.suppress(Exception):
-                    await stop_waiter
+                for task in (read_task, stop_waiter):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(read_task, stop_waiter, return_exceptions=True)
 
 
 def _map_timeframe(timeframe: str, subscription_interval_cls: Any) -> Any:
@@ -406,6 +437,9 @@ def _load_tinvest_sdk() -> dict[str, Any] | None:
 
     try:
         module = importlib.import_module("t_tech.invest")
+        grpc_helpers = importlib.import_module("t_tech.invest._grpc_helpers")
+        market_data_pb2 = importlib.import_module("t_tech.invest.grpc.marketdata_pb2")
+        schemas = importlib.import_module("t_tech.invest.schemas")
     except ImportError:
         return None
 
@@ -413,10 +447,17 @@ def _load_tinvest_sdk() -> dict[str, Any] | None:
         "AsyncClient",
         "SubscriptionInterval",
         "CandleInstrument",
+        "MarketDataServerSideStreamRequest",
+        "SubscribeCandlesRequest",
+        "SubscriptionAction",
     ]
 
     if all(hasattr(module, attr) for attr in required):
-        return {attr: getattr(module, attr) for attr in required}
+        result = {attr: getattr(module, attr) for attr in required}
+        result["grpc_helpers"] = grpc_helpers
+        result["market_data_pb2"] = market_data_pb2
+        result["MarketDataResponse"] = getattr(schemas, "MarketDataResponse")
+        return result
     return None
 
 
