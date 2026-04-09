@@ -1,918 +1,428 @@
+﻿"""Entry point for Stage 4: simulator + stats + Telegram notifications."""
+
+from __future__ import annotations
+
+import argparse
 import asyncio
+import contextlib
 import logging
 import os
-import sqlite3
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import signal
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 
-import aiohttp
-import pandas as pd
-from t_tech.invest import AsyncClient, CandleInterval, InstrumentIdType
-
-from stats import StatsTracker
-
-# pip install t-tech-investments --index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
-
-# ==============================
-# CONFIG
-# ==============================
-# Environment variables required:
-#   INVEST_TOKEN=...
-#   TELEGRAM_BOT_TOKEN=...
-#   TELEGRAM_CHAT_ID=...
-#
-# Optional:
-#   DB_PATH=signals.db
-#   CHECK_EVERY_SECONDS=60
-#
-# Notes:
-# 1) Strategy is trend-first:
-#    - H1 defines market bias
-#    - M15 builds setup
-#    - M5 confirms entry on candle close
-# 2) Countertrend logic is disabled by default and separated with a flag.
-# 3) Cocoa is intentionally excluded from the default basket because its intraday behavior
-#    is materially less uniform than Brent / Silver / S&P 500 futures.
-#
-# Instrument IDs:
-# T-Bank requires either instrument UID / FIGI, or ticker + class_code.
-# The code below resolves instruments by ticker + class_code via GetInstrumentBy.
-# Update TICKER and CLASS_CODE with the exact symbols from your broker terminal / API.
-from dotenv import load_dotenv
-load_dotenv()
-
-TOKEN = os.environ["INVEST_TOKEN"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-DB_PATH = os.getenv("DB_PATH", "signals.db")
-CHECK_EVERY_SECONDS = int(os.getenv("CHECK_EVERY_SECONDS", "60"))
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-)
-logger = logging.getLogger("futures-signal-bot")
+from core.config_loader import ConfigError, ConfigLoader
+from core.instrument_registry import InstrumentRegistry
+from core.logger_setup import setup_logging
+from core.market_data import Candle, CandleValidationError, create_market_data_client
+from core.news_filter import NewsBlackoutFilter
+from core.session_manager import SessionManager
+from core.signal_engine import SignalEngine
+from core.stats_engine import StatsEngine
+from core.telegram_notifier import TelegramConfig, TelegramNotifier
+from core.trade_simulator import TradeSimulator
+from storage.memory_store import MemoryCandleStore
+from storage.sqlite_store import SQLiteStore
 
 
-@dataclass
-class InstrumentConfig:
-    alias: str
-    ticker: str
-    class_code: str
-    allow_countertrend: bool = False
-    atr_stop_mult: float = 1.2
-    adx_threshold_h1: float = 18.0
-    adx_threshold_m15: float = 16.0
-    min_score_trend: int = 3  # MODE: для более строго алгоса = 4
-    min_score_setup: int = 3  # MODE: для более строго алгоса = 4
-    m15_setup_expiry_bars: int = 4
-    rr_tp1: float = 1.0
-    rr_tp2: float = 2.0
+LOGGER = logging.getLogger("app")
+CLOSE_EVENTS = {"tp2_hit", "sl_hit", "expired", "cancelled_by_news", "cancelled_by_session_end"}
 
 
-DEFAULT_INSTRUMENTS: List[InstrumentConfig] = [
-    # InstrumentConfig(alias="BR", ticker="BMK6", class_code="SPBFUT", allow_countertrend=False),
-    InstrumentConfig(alias="SI", ticker="S1M6", class_code="SPBFUT", allow_countertrend=True),
-    InstrumentConfig(alias="SPX", ticker="SFM6", class_code="SPBFUT", allow_countertrend=True),
-    InstrumentConfig(alias="CC", ticker="CCJ6", class_code="SPBFUT", allow_countertrend=True),
-    # InstrumentConfig(alias="NIKK", ticker="N2M6", class_code="SPBFUT", allow_countertrend=False),
-]
-
-
-# ==============================
-# DB / STATE
-# ==============================
-class StateStore:
-    def __init__(self, path: str) -> None:
-        self.path = path
-        self._init_db()
-
-    def _init_db(self) -> None:
-        with sqlite3.connect(self.path) as conn:
-            conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS state (
-                    instrument_alias TEXT PRIMARY KEY,
-                    payload TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.commit()
-
-    def load(self, instrument_alias: str) -> Dict[str, Any]:
-        import json
-
-        with sqlite3.connect(self.path) as conn:
-            row = conn.execute(
-                "SELECT payload FROM state WHERE instrument_alias = ?",
-                (instrument_alias,),
-            ).fetchone()
-        if not row:
-            return {}
-        return json.loads(row[0])
-
-    def save(self, instrument_alias: str, payload: Dict[str, Any]) -> None:
-        import json
-
-        with sqlite3.connect(self.path) as conn:
-            conn.execute(
-                """
-                INSERT INTO state (instrument_alias, payload, updated_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(instrument_alias) DO UPDATE SET
-                    payload = excluded.payload,
-                    updated_at = excluded.updated_at
-                """,
-                (instrument_alias, json.dumps(payload, ensure_ascii=False), datetime.now(timezone.utc).isoformat()),
-            )
-            conn.commit()
-
-
-# ==============================
-# TELEGRAM
-# ==============================
-async def send_telegram_message(text: str) -> None:
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True,
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload, timeout=20) as resp:
-            body = await resp.text()
-            if resp.status >= 300:
-                raise RuntimeError(f"Telegram error {resp.status}: {body}")
-
-
-# ==============================
-# T-BANK HELPERS
-# ==============================
-def quotation_to_float(q: Any) -> float:
-    return q.units + q.nano / 1_000_000_000
-
-
-async def resolve_instrument(client: AsyncClient, cfg: InstrumentConfig) -> Tuple[str, str]:
-    response = await client.instruments.get_instrument_by(
-        id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_TICKER,
-        class_code=cfg.class_code,
-        id=cfg.ticker,
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Intraday futures signal engine - Stage 4")
+    parser.add_argument(
+        "--config-dir",
+        type=Path,
+        default=Path(__file__).parent / "config",
+        help="Path to YAML configuration directory",
     )
-    instrument = response.instrument
-    instrument_id = instrument.uid or instrument.figi
-    if not instrument_id:
-        raise RuntimeError(f"Could not resolve instrument id for {cfg.alias}")
-    return instrument_id, instrument.name
-
-
-INTERVAL_TO_DAYS: Dict[CandleInterval, int] = {
-    CandleInterval.CANDLE_INTERVAL_HOUR: 35,
-    CandleInterval.CANDLE_INTERVAL_15_MIN: 12,
-    CandleInterval.CANDLE_INTERVAL_5_MIN: 5,
-}
-
-
-async def fetch_candles_df(
-    client: AsyncClient,
-    instrument_id: str,
-    interval: CandleInterval,
-) -> pd.DataFrame:
-    from t_tech.invest.utils import now
-
-    rows: List[Dict[str, Any]] = []
-    async for candle in client.get_all_candles(
-        instrument_id=instrument_id,
-        from_=now() - timedelta(days=INTERVAL_TO_DAYS[interval]),
-        interval=interval,
-    ):
-        rows.append(
-            {
-                "time": candle.time,
-                "open": quotation_to_float(candle.open),
-                "high": quotation_to_float(candle.high),
-                "low": quotation_to_float(candle.low),
-                "close": quotation_to_float(candle.close),
-                "volume": float(candle.volume),
-                "is_complete": bool(getattr(candle, "is_complete", True)),
-            }
-        )
-
-    if not rows:
-        raise RuntimeError(f"No candles returned for {instrument_id}, interval={interval}")
-
-    df = pd.DataFrame(rows).sort_values("time").drop_duplicates(subset=["time"]).reset_index(drop=True)
-    df["time"] = pd.to_datetime(df["time"], utc=True)
-    return df
-
-
-# ==============================
-# INDICATORS
-# ==============================
-def ema(series: pd.Series, length: int) -> pd.Series:
-    return series.ewm(span=length, adjust=False).mean()
-
-
-
-def rsi(series: pd.Series, length: int = 14) -> pd.Series:
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    avg_gain = up.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-    avg_loss = down.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-    rs = avg_gain / avg_loss.replace(0, pd.NA)
-    out = 100 - (100 / (1 + rs))
-    return out.fillna(50.0)
-
-
-
-def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
-    fast_ema = ema(series, fast)
-    slow_ema = ema(series, slow)
-    macd_line = fast_ema - slow_ema
-    signal_line = ema(macd_line, signal)
-    hist = macd_line - signal_line
-    return macd_line, signal_line, hist
-
-
-
-def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    prev_close = df["close"].shift(1)
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - prev_close).abs(),
-            (df["low"] - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    return tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-
-
-
-def adx(df: pd.DataFrame, length: int = 14) -> pd.Series:
-    up_move = df["high"].diff()
-    down_move = -df["low"].diff()
-
-    plus_dm = pd.Series(0.0, index=df.index)
-    minus_dm = pd.Series(0.0, index=df.index)
-
-    plus_dm[(up_move > down_move) & (up_move > 0)] = up_move[(up_move > down_move) & (up_move > 0)]
-    minus_dm[(down_move > up_move) & (down_move > 0)] = down_move[(down_move > up_move) & (down_move > 0)]
-
-    prev_close = df["close"].shift(1)
-    tr = pd.concat(
-        [
-            df["high"] - df["low"],
-            (df["high"] - prev_close).abs(),
-            (df["low"] - prev_close).abs(),
-        ],
-        axis=1,
-    ).max(axis=1)
-    atr_smoothed = tr.ewm(alpha=1 / length, min_periods=length, adjust=False).mean()
-
-    plus_di = 100 * plus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean() / atr_smoothed.replace(0, pd.NA)
-    minus_di = 100 * minus_dm.ewm(alpha=1 / length, min_periods=length, adjust=False).mean() / atr_smoothed.replace(0, pd.NA)
-    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, pd.NA)) * 100
-    return dx.ewm(alpha=1 / length, min_periods=length, adjust=False).mean().fillna(0.0)
-
-
-
-def session_vwap(df: pd.DataFrame) -> pd.Series:
-    # Approximates intraday VWAP by UTC calendar day.
-    # If you later need strict exchange-session alignment, group by exchange local session date.
-    typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
-    session_key = df["time"].dt.strftime("%Y-%m-%d")
-    pv = typical_price * df["volume"]
-    cum_pv = pv.groupby(session_key).cumsum()
-    cum_vol = df["volume"].groupby(session_key).cumsum().replace(0, pd.NA)
-    return (cum_pv / cum_vol).fillna(df["close"])
-
-
-
-def enrich(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["ema9"] = ema(df["close"], 9)
-    df["ema21"] = ema(df["close"], 21)
-    df["rsi14"] = rsi(df["close"], 14)
-    macd_line, macd_signal, macd_hist = macd(df["close"], 12, 26, 9)
-    df["macd"] = macd_line
-    df["macd_signal"] = macd_signal
-    df["macd_hist"] = macd_hist
-    df["atr14"] = atr(df, 14)
-    df["adx14"] = adx(df, 14)
-    df["vol_sma20"] = df["volume"].rolling(20).mean()
-    df["vwap"] = session_vwap(df)
-    return df
-
-
-
-def align_lower_to_higher(lower_df: pd.DataFrame, higher_df: pd.DataFrame, cols: List[str], prefix: str) -> pd.DataFrame:
-    missing = [c for c in cols if c not in higher_df.columns]
-    if missing:
-        raise KeyError(f"Missing columns in higher_df: {missing}. Available: {list(higher_df.columns)}")
-
-    left = lower_df.sort_values("time").copy()
-    rename_map = {c: f"{prefix}_{c}" for c in cols}
-    right = (
-        higher_df[["time", *cols]]
-        .copy()
-        .rename(columns=rename_map)
-        .sort_values("time")
+    parser.add_argument(
+        "--log-dir",
+        type=Path,
+        default=Path(__file__).parent / "logs",
+        help="Path for log files",
     )
-
-    merged = pd.merge_asof(left, right, on="time", direction="backward")
-    return merged
-
-# ==============================
-# STRATEGY
-# ==============================
-def score_trend_long(row: pd.Series, adx_threshold: float) -> int:
-    return sum(
-        [
-            row["close"] > row["ema9"],
-            row["ema9"] > row["ema21"],
-            row["close"] > row["vwap"],
-            row["rsi14"] > 52,
-            row["macd"] > row["macd_signal"],
-            row["adx14"] > adx_threshold,
-        ]
+    parser.add_argument(
+        "--run-seconds",
+        type=int,
+        default=0,
+        help="Optional auto-stop timeout. 0 means run forever.",
     )
-
-
-
-def score_trend_short(row: pd.Series, adx_threshold: float) -> int:
-    return sum(
-        [
-            row["close"] < row["ema9"],
-            row["ema9"] < row["ema21"],
-            row["close"] < row["vwap"],
-            row["rsi14"] < 48,
-            row["macd"] < row["macd_signal"],
-            row["adx14"] > adx_threshold,
-        ]
+    parser.add_argument(
+        "--print-every",
+        type=int,
+        default=10,
+        help="How often to log memory/regime snapshots (in candle updates)",
     )
+    return parser.parse_args()
 
 
+def load_env_file(path: Path) -> None:
+    """Load KEY=VALUE entries from .env without external dependencies."""
 
-def swing_stop_long(df: pd.DataFrame, lookback: int = 5) -> float:
-    return float(df["low"].tail(lookback).min())
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if value and not value.startswith(("'", '"')) and "#" in value:
+            value = value.split("#", 1)[0].strip()
+        value = value.strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
+def resolve_market_data_mode(config_params: dict[str, Any]) -> str:
+    env_value = os.getenv("MARKET_DATA_MODE", "").strip().lower()
+    if env_value:
+        return env_value
 
-def swing_stop_short(df: pd.DataFrame, lookback: int = 5) -> float:
-    return float(df["high"].tail(lookback).max())
+    market_data_cfg = config_params.get("market_data", {})
+    if isinstance(market_data_cfg, dict):
+        mode = str(market_data_cfg.get("mode", "demo")).strip().lower()
+        return mode or "demo"
+
+    return "demo"
 
 
-
-def determine_h1_bias(h1: pd.DataFrame, cfg: InstrumentConfig) -> Dict[str, Any]:
-    row = h1.iloc[-1]
-    long_score = score_trend_long(row, cfg.adx_threshold_h1)
-    short_score = score_trend_short(row, cfg.adx_threshold_h1)
-
-    if long_score >= cfg.min_score_trend and long_score > short_score:
-        side = "long"
-    elif short_score >= cfg.min_score_trend and short_score > long_score:
-        side = "short"
+def resolve_db_path(config_params: dict[str, Any]) -> Path:
+    env_db = os.getenv("DB_PATH", "").strip()
+    if env_db:
+        candidate = Path(env_db)
     else:
-        side = "neutral"
-
-    return {
-        "side": side,
-        "long_score": int(long_score),
-        "short_score": int(short_score),
-        "adx": round(float(row["adx14"]), 2),
-        "rsi": round(float(row["rsi14"]), 2),
-        "close": round(float(row["close"]), 4),
-        "ema9": round(float(row["ema9"]), 4),
-        "ema21": round(float(row["ema21"]), 4),
-        "vwap": round(float(row["vwap"]), 4),
-        "time": row["time"].isoformat(),
-    }
-
-
-
-def determine_m15_setup(m15: pd.DataFrame, h1_bias: Dict[str, Any], cfg: InstrumentConfig) -> Dict[str, Any]:
-    row = m15.iloc[-1]
-    prev = m15.iloc[-2]
-    side = h1_bias["side"]
-
-    if side == "long":
-        setup_score = sum(
-            [
-                row["close"] > row["ema21"],
-                row["ema9"] > row["ema21"],
-                row["rsi14"] > 48,
-                row["macd"] > row["macd_signal"],
-                row["adx14"] > cfg.adx_threshold_m15,
-                row["low"] <= row["ema9"] * 1.001 or row["low"] <= row["vwap"] * 1.001,
-            ]
-        )
-        valid = setup_score >= cfg.min_score_setup and row["close"] >= prev["close"]
-    elif side == "short":
-        setup_score = sum(
-            [
-                row["close"] < row["ema21"],
-                row["ema9"] < row["ema21"],
-                row["rsi14"] < 52,
-                row["macd"] < row["macd_signal"],
-                row["adx14"] > cfg.adx_threshold_m15,
-                row["high"] >= row["ema9"] * 0.999 or row["high"] >= row["vwap"] * 0.999,
-            ]
-        )
-        valid = setup_score >= cfg.min_score_setup and row["close"] <= prev["close"]
-    else:
-        setup_score = 0
-        valid = False
-
-    return {
-        "active": bool(valid),
-        "side": side,
-        "score": int(setup_score),
-        "time": row["time"].isoformat(),
-        "close": round(float(row["close"]), 4),
-        "ema9": round(float(row["ema9"]), 4),
-        "ema21": round(float(row["ema21"]), 4),
-        "vwap": round(float(row["vwap"]), 4),
-    }
-
-
-
-def determine_m5_entry(m5: pd.DataFrame, h1_bias: Dict[str, Any], m15_setup: Dict[str, Any], cfg: InstrumentConfig) -> Optional[Dict[str, Any]]:
-    if not m15_setup["active"]:
-        return None
-
-    row = m5.iloc[-1]
-    prev = m5.iloc[-2]
-
-    # Softer entry logic for learning / lower-volatility sessions.
-    # We keep candle-close confirmation, but reduce the number of mandatory filters.
-    if h1_bias["side"] == "long":
-        support_touch = (
-            row["low"] <= row["ema9"] * 1.002
-            or row["low"] <= row["ema21"] * 1.001
-            or row["low"] <= row["vwap"] * 1.001
-        )
-        bullish_reclaim = (
-            row["close"] > row["ema9"]
-            or (prev["close"] <= prev["ema9"] and row["close"] > prev["high"])
-        )
-        momentum_ok = sum([
-            row["rsi14"] > 48,
-            row["macd"] >= row["macd_signal"],
-            row["close"] >= row["open"],
-            row["volume"] >= row["vol_sma20"] * 0.8 if pd.notna(row["vol_sma20"]) else True,
-        ]) >= 2
-
-        if not (support_touch and bullish_reclaim and momentum_ok):
-            return None
-
-        entry = float(row["close"])
-        atr_stop = entry - float(row["atr14"]) * cfg.atr_stop_mult
-        struct_stop = swing_stop_long(m5, lookback=5)
-        stop = min(atr_stop, struct_stop)
-        risk = entry - stop
-        if risk <= 0:
-            return None
-
-        score_for = int(score_trend_long(row, cfg.adx_threshold_m15))
-        score_against = int(score_trend_short(row, cfg.adx_threshold_m15))
-        return {
-            "side": "long",
-            "countertrend": False,
-            "entry": round(entry, 4),
-            "stop": round(stop, 4),
-            "tp1": round(entry + risk * cfg.rr_tp1, 4),
-            "tp2": round(entry + risk * cfg.rr_tp2, 4),
-            "risk_r": round(risk, 4),
-            "entry_time": row["time"].isoformat(),
-            "reason": "M5 подтвердил long после отката к EMA/VWAP в сторону тренда H1 и setup M15",
-            "score_for": score_for,
-            "score_against": score_against,
-            "confidence": confidence_from_scores(score_for, score_against),
-        }
-
-    if h1_bias["side"] == "short":
-        resistance_touch = (
-            row["high"] >= row["ema9"] * 0.998
-            or row["high"] >= row["ema21"] * 0.999
-            or row["high"] >= row["vwap"] * 0.999
-        )
-        bearish_reclaim = (
-            row["close"] < row["ema9"]
-            or (prev["close"] >= prev["ema9"] and row["close"] < prev["low"])
-        )
-        momentum_ok = sum([
-            row["rsi14"] < 52,
-            row["macd"] <= row["macd_signal"],
-            row["close"] <= row["open"],
-            row["volume"] >= row["vol_sma20"] * 0.8 if pd.notna(row["vol_sma20"]) else True,
-        ]) >= 2
-
-        if not (resistance_touch and bearish_reclaim and momentum_ok):
-            return None
-
-        entry = float(row["close"])
-        atr_stop = entry + float(row["atr14"]) * cfg.atr_stop_mult
-        struct_stop = swing_stop_short(m5, lookback=5)
-        stop = max(atr_stop, struct_stop)
-        risk = stop - entry
-        if risk <= 0:
-            return None
-
-        score_for = int(score_trend_short(row, cfg.adx_threshold_m15))
-        score_against = int(score_trend_long(row, cfg.adx_threshold_m15))
-        return {
-            "side": "short",
-            "countertrend": False,
-            "entry": round(entry, 4),
-            "stop": round(stop, 4),
-            "tp1": round(entry - risk * cfg.rr_tp1, 4),
-            "tp2": round(entry - risk * cfg.rr_tp2, 4),
-            "risk_r": round(risk, 4),
-            "entry_time": row["time"].isoformat(),
-            "reason": "M5 подтвердил short после отката к EMA/VWAP в сторону тренда H1 и setup M15",
-            "score_for": score_for,
-            "score_against": score_against,
-            "confidence": confidence_from_scores(score_for, score_against),
-        }
-
-    return None
-
-
-def maybe_countertrend_entry(m5: pd.DataFrame, h1_bias: Dict[str, Any], cfg: InstrumentConfig) -> Optional[Dict[str, Any]]:
-    if not cfg.allow_countertrend:
-        return None
-
-    row = m5.iloc[-1]
-    prev = m5.iloc[-2]
-
-    # Softer countertrend logic, but still stricter than trend entries.
-    if h1_bias["side"] == "long":
-        stretched_down = row["close"] < row["ema21"] and row["rsi14"] < 45
-        reversal_hint = (
-            row["close"] < row["ema9"]
-            and (row["close"] < row["open"] or row["close"] < prev["low"])
-            and row["macd"] <= row["macd_signal"]
-        )
-        if stretched_down and reversal_hint:
-            entry = float(row["close"])
-            atr_stop = entry + float(row["atr14"]) * 1.0
-            struct_stop = swing_stop_short(m5, lookback=4)
-            stop = max(atr_stop, struct_stop)
-            risk = stop - entry
-            if risk > 0:
-                score_for = int(score_trend_short(row, cfg.adx_threshold_m15))
-                score_against = int(score_trend_long(row, cfg.adx_threshold_m15))
-                return {
-                    "side": "short",
-                    "countertrend": True,
-                    "entry": round(entry, 4),
-                    "stop": round(stop, 4),
-                    "tp1": round(entry - risk, 4),
-                    "tp2": round(entry - 1.5 * risk, 4),
-                    "risk_r": round(risk, 4),
-                    "entry_time": row["time"].isoformat(),
-                    "reason": "Контртрендовый short: M5 показал разворот вниз после локального растяжения против H1 long",
-                    "score_for": score_for,
-                    "score_against": score_against,
-                    "confidence": confidence_from_scores(score_for, score_against),
-                }
-
-    if h1_bias["side"] == "short":
-        stretched_up = row["close"] > row["ema21"] and row["rsi14"] > 55
-        reversal_hint = (
-            row["close"] > row["ema9"]
-            and (row["close"] > row["open"] or row["close"] > prev["high"])
-            and row["macd"] >= row["macd_signal"]
-        )
-        if stretched_up and reversal_hint:
-            entry = float(row["close"])
-            atr_stop = entry - float(row["atr14"]) * 1.0
-            struct_stop = swing_stop_long(m5, lookback=4)
-            stop = min(atr_stop, struct_stop)
-            risk = entry - stop
-            if risk > 0:
-                score_for = int(score_trend_long(row, cfg.adx_threshold_m15))
-                score_against = int(score_trend_short(row, cfg.adx_threshold_m15))
-                return {
-                    "side": "long",
-                    "countertrend": True,
-                    "entry": round(entry, 4),
-                    "stop": round(stop, 4),
-                    "tp1": round(entry + risk, 4),
-                    "tp2": round(entry + 1.5 * risk, 4),
-                    "risk_r": round(risk, 4),
-                    "entry_time": row["time"].isoformat(),
-                    "reason": "Контртрендовый long: M5 показал разворот вверх после локального растяжения против H1 short",
-                    "score_for": score_for,
-                    "score_against": score_against,
-                    "confidence": confidence_from_scores(score_for, score_against),
-                }
-
-    return None
-
-
-
-def trade_update(trade: Dict[str, Any], latest_price_row: pd.Series) -> Dict[str, Any]:
-    updated = dict(trade)
-    side = trade["side"]
-    high = float(latest_price_row["high"])
-    low = float(latest_price_row["low"])
-    stop = float(trade["stop"])
-    entry = float(trade["entry"])
-    tp1 = float(trade["tp1"])
-    tp2 = float(trade["tp2"])
-
-    updated.setdefault("status", "active")
-    updated.setdefault("tp1_hit", False)
-    updated.setdefault("tp2_hit", False)
-    updated.setdefault("breakeven_armed", False)
-
-    if side == "long":
-        if not updated["tp1_hit"] and high >= tp1:
-            updated["tp1_hit"] = True
-            updated["breakeven_armed"] = True
-            updated["stop"] = round(entry, 4)
-        if high >= tp2:
-            updated["tp2_hit"] = True
-            updated["status"] = "closed_tp2"
-        if low <= float(updated["stop"]):
-            updated["status"] = "closed_breakeven" if updated["tp1_hit"] else "closed_stop"
-    else:
-        if not updated["tp1_hit"] and low <= tp1:
-            updated["tp1_hit"] = True
-            updated["breakeven_armed"] = True
-            updated["stop"] = round(entry, 4)
-        if low <= tp2:
-            updated["tp2_hit"] = True
-            updated["status"] = "closed_tp2"
-        if high >= float(updated["stop"]):
-            updated["status"] = "closed_breakeven" if updated["tp1_hit"] else "closed_stop"
-
-    return updated
-
-
-
-def setup_invalidated(m15: pd.DataFrame, setup: Dict[str, Any], h1_bias: Dict[str, Any], cfg: InstrumentConfig) -> bool:
-    if not setup.get("active"):
-        return False
-
-    setup_time = pd.Timestamp(setup["time"])
-    elapsed_bars = int((m15["time"] > setup_time).sum())
-    if elapsed_bars > cfg.m15_setup_expiry_bars:
-        return True
-
-    row = m15.iloc[-1]
-    side = setup["side"]
-    if h1_bias["side"] != side:
-        return True
-
-    if side == "long":
-        return bool(row["close"] < row["ema21"] and row["close"] < row["vwap"])
-    if side == "short":
-        return bool(row["close"] > row["ema21"] and row["close"] > row["vwap"])
-    return True
-
-
-# ==============================
-# MESSAGE BUILDERS
-# ==============================
-def fmt(v: Any) -> str:
-    if isinstance(v, float):
-        return f"{v:.4f}"
-    return str(v)
-
-
-
-def direction_ru(side: str) -> str:
-    return {"long": "LONG", "short": "SHORT", "neutral": "НЕЙТРАЛЬНО"}.get(side, side.upper())
-
-
-def confidence_from_scores(long_score: int, short_score: int, max_score: int = 6) -> int:
-    lead = max(long_score, short_score)
-    edge = abs(long_score - short_score)
-    raw = (lead / max_score) * 70 + (edge / max_score) * 30
-    return int(round(min(100, max(0, raw))))
-
-
-def bias_message(alias: str, instrument_name: str, bias: Dict[str, Any]) -> str:
-    confidence = confidence_from_scores(bias["long_score"], bias["short_score"])
-    return (
-        f'''<b>{alias}</b> | {instrument_name}\n\n'''
-        f'''<b>ОБЩИЙ ТРЕНД</b>\n'''
-        f'''<b>Тренд H1:</b> {direction_ru(bias['side'])}\n'''
-        f'''Счет: \n  - за LONG: {bias['long_score']}\n  - за SHORT: {bias['short_score']}\n'''
-        f'''\nОценка силы сигнала: {confidence}%\n'''
-    )
-
-
-
-def setup_message(alias: str, instrument_name: str, setup: Dict[str, Any]) -> str:
-    setup_confidence = int(round(min(100, max(0, (setup['score'] / 6) * 100))))
-    return (
-        f'''<b>{alias}</b> | {instrument_name}\n\n'''
-        f'''<b>Уведомление - M15 активен:</b> {direction_ru(setup['side'])}\n'''
-        f'''Счет подтверждений: {setup['score']} из 6\n'''
-        f'''Вероятность / сила setup: {setup_confidence}%\n'''
-        f'''Цена: {fmt(setup['close'])} | EMA9: {fmt(setup['ema9'])} | EMA21: {fmt(setup['ema21'])}\n'''
-        f'''VWAP: {fmt(setup['vwap'])}\n'''
-    )
-
-
-
-def invalidation_message(alias: str, instrument_name: str, setup: Dict[str, Any]) -> str:
-    return (
-        f'''<b>{alias}</b> | {instrument_name}\n\n'''
-        f'''<b>Уведомление - отмена</b>\n'''
-        f'''Направление: {direction_ru(setup.get('side', 'n/a'))}\n'''
-        f'''Время предыдущего setup: {setup.get('time', 'n/a')}\n'''
-    )
-
-
-
-def entry_message(alias: str, instrument_name: str, entry: Dict[str, Any]) -> str:
-    is_ct = entry.get("countertrend")
-    label = "🔁 Контртренд" if is_ct else "➡️ По тренду"
-    confidence = entry.get("confidence")
-    score_for = entry.get("score_for")
-    score_against = entry.get("score_against")
-
-    extra = ""
-    if score_for is not None and score_against is not None:
-        extra += f"Счет за вход: {score_for} | против: {score_against}\n"
-    if confidence is not None:
-        extra += f"Оценка вероятности: {confidence}%\n"
-
-    return (
-        f'''<b>{alias}</b> | {instrument_name}\n\n'''
-        f'''{label}\n'''
-        f'''Тикер: {alias}\n'''
-        f'''Направление: {'🟢 LONG' if entry['side']=='long' else '🔴 SHORT'}\n'''
-        f'''Причина: {entry['reason']}\n'''
-        f'''Вход: {fmt(entry['entry'])} | SL: {fmt(entry['stop'])}\n'''
-        f'''TP1: {fmt(entry['tp1'])} | TP2: {fmt(entry['tp2'])}\n'''
-        f'''{extra}\n'''
-        f'''Риск: {fmt(entry['risk_r'])}\n'''
-    )
-
-
-
-def trade_event_message(alias: str, instrument_name: str, event: str, trade: Dict[str, Any]) -> str:
-    title_map = {
-        "tp1": "TP1 достигнут, стоп перенесен в безубыток",
-        "tp2": "TP2 достигнут, сделка закрыта",
-        "closed_stop": "Сработал стоп-лосс",
-        "closed_breakeven": "Сделка закрыта по безубытку",
-    }
-    title = title_map.get(event, event)
-    return (
-        f'''<b>{alias}</b> | {instrument_name}\n\n'''
-        f'''<b>{title}</b>\n'''
-        f'''Тикер: {alias}\n'''
-        f'''Направление: {direction_ru(trade['side'])}\n'''
-        f'''Вход: {fmt(trade['entry'])}\n'''
-        f'''SL: {fmt(trade['stop'])}\n'''
-        f'''TP1: {fmt(trade['tp1'])}\n'''
-        f'''TP2: {fmt(trade['tp2'])}\n'''
-    )
-
-
-# ==============================
-# ENGINE
-# ==============================
-async def process_instrument(
-    client: AsyncClient,
-    store: StateStore,
-    stats: StatsTracker,
-    cfg: InstrumentConfig,
-) -> None:
-    instrument_id, instrument_name = await resolve_instrument(client, cfg)
-
-    h1 = enrich(await fetch_candles_df(client, instrument_id, CandleInterval.CANDLE_INTERVAL_HOUR))
-    m15 = enrich(await fetch_candles_df(client, instrument_id, CandleInterval.CANDLE_INTERVAL_15_MIN))
-    m5 = enrich(await fetch_candles_df(client, instrument_id, CandleInterval.CANDLE_INTERVAL_5_MIN))
-
-    # Enrich lower TFs with H1 context when needed later.
-    m15 = align_lower_to_higher(m15, h1, ["ema9", "ema21", "vwap", "adx14", "rsi14"], "h1")
-    m5 = align_lower_to_higher(m5, m15, ["ema9", "ema21", "vwap", "adx14", "rsi14"], "m15")
-
-    current_bias = determine_h1_bias(h1, cfg)
-    current_setup = determine_m15_setup(m15, current_bias, cfg)
-    new_entry = determine_m5_entry(m5, current_bias, current_setup, cfg)
-    countertrend_entry = maybe_countertrend_entry(m5, current_bias, cfg)
-
-    state = store.load(cfg.alias)
-    previous_bias = state.get("bias", {})
-    previous_setup = state.get("setup", {})
-    active_trade = state.get("trade")
-
-    # 1) H1 bias change
-    # if previous_bias.get("side") != current_bias["side"]:
-    #     await send_telegram_message(bias_message(cfg.alias, instrument_name, current_bias))
-
-    # 2) M15 setup activation
-    # if current_setup["active"] and not previous_setup.get("active", False):
-    #     await send_telegram_message(setup_message(cfg.alias, instrument_name, current_setup))
-
-    # 3) M15 invalidation
-    if previous_setup.get("active", False) and setup_invalidated(m15, previous_setup, current_bias, cfg):
-        # await send_telegram_message(invalidation_message(cfg.alias, instrument_name, previous_setup))
-        current_setup = {"active": False, "side": current_bias["side"]}
-
-    # 4) Entries
-    chosen_entry = None
-    if not active_trade and new_entry:
-        chosen_entry = new_entry
-    elif not active_trade and countertrend_entry:
-        chosen_entry = countertrend_entry
-
-    if chosen_entry:
-        active_trade = {
-            **chosen_entry,
-            "status": "active",
-            "tp1_hit": False,
-            "tp2_hit": False,
-            "breakeven_armed": False,
-        }
-        stats.record_entry(cfg.alias)
-        await send_telegram_message(entry_message(cfg.alias, instrument_name, active_trade))
-
-    # 5) Existing trade lifecycle
-    if active_trade:
-        prev_trade = dict(active_trade)
-        updated_trade = trade_update(active_trade, m5.iloc[-1])
-
-        if not prev_trade.get("tp1_hit") and updated_trade.get("tp1_hit"):
-            stats.record_tp1(cfg.alias)
-            await send_telegram_message(trade_event_message(cfg.alias, instrument_name, "tp1", updated_trade))
-
-        if not prev_trade.get("tp2_hit") and updated_trade.get("tp2_hit"):
-            stats.record_tp2(cfg.alias)
-            await send_telegram_message(trade_event_message(cfg.alias, instrument_name, "tp2", updated_trade))
-
-        if prev_trade.get("status") == "active" and updated_trade.get("status") == "closed_stop":
-            stats.record_sl(cfg.alias)
-            await send_telegram_message(trade_event_message(cfg.alias, instrument_name, "closed_stop", updated_trade))
-
-        if prev_trade.get("status") == "active" and updated_trade.get("status") == "closed_breakeven":
-            stats.record_breakeven(cfg.alias)
-            await send_telegram_message(
-                trade_event_message(cfg.alias, instrument_name, "closed_breakeven", updated_trade))
-
-        if updated_trade.get("status", "active").startswith("closed"):
-            active_trade = None
+        storage_cfg = config_params.get("storage", {})
+        if isinstance(storage_cfg, dict):
+            value = str(storage_cfg.get("db_path", "signals.db")).strip() or "signals.db"
         else:
-            active_trade = updated_trade
+            value = "signals.db"
+        candidate = Path(value)
 
-    new_state = {
-        "instrument_id": instrument_id,
-        "instrument_name": instrument_name,
-        "bias": current_bias,
-        "setup": current_setup,
-        "trade": active_trade,
-        "last_processed_at": datetime.now(timezone.utc).isoformat(),
-    }
-    store.save(cfg.alias, new_state)
+    if candidate.is_absolute():
+        return candidate
+    return Path(__file__).parent / candidate
 
 
-async def run_once(instruments: List[InstrumentConfig], stats: StatsTracker) -> None:
-    store = StateStore(DB_PATH)
-    async with AsyncClient(TOKEN) as client:
-        for cfg in instruments:
-            try:
-                await process_instrument(client, store, stats, cfg)
-            except Exception as exc:
-                logger.exception("Error processing %s: %s", cfg.alias, exc)
-                try:
-                    await send_telegram_message(
-                        f"<b>{cfg.alias}</b>\n<b>Error:</b> {type(exc).__name__}: {exc}"
-                    )
-                except Exception:
-                    logger.exception("Failed to send Telegram error message for %s", cfg.alias)
+async def build_notifier(params: dict[str, Any]) -> TelegramNotifier:
+    config = TelegramConfig.from_sources(env=os.environ, params=params)
+    notifier = TelegramNotifier(config=config, logger=logging.getLogger("telegram"))
+    await notifier.start()
+    return notifier
 
 
-async def main_loop() -> None:
-    logger.info("Starting futures signal bot")
-    logger.info("Scan interval: %s sec", CHECK_EVERY_SECONDS)
+async def run() -> int:
+    args = parse_args()
 
-    stats = StatsTracker()
+    setup_logging(args.log_dir)
+    LOGGER.info("Application start")
+
+    load_env_file(Path(__file__).parent / ".env")
 
     try:
-        while True:
-            started = datetime.now(timezone.utc)
-            await run_once(DEFAULT_INSTRUMENTS, stats)
-            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
-            sleep_for = max(1, CHECK_EVERY_SECONDS - int(elapsed))
-            await asyncio.sleep(sleep_for)
-    finally:
-        print(stats.build_report())
+        app_config = ConfigLoader(args.config_dir).load()
+    except ConfigError as exc:
+        LOGGER.critical("Configuration error: %s", exc)
+        bootstrap_notifier = await build_notifier({})
+        try:
+            await bootstrap_notifier.notify_critical("Configuration error", str(exc))
+        finally:
+            await bootstrap_notifier.close()
+        return 2
+
+    notifier = await build_notifier(app_config.params)
+
+    LOGGER.info(
+        "Configs loaded: instruments=%d enabled=%d blackout_windows=%d",
+        len(app_config.instruments),
+        sum(1 for item in app_config.instruments.values() if item.enabled),
+        len(app_config.blackout_windows),
+    )
+
+    registry = InstrumentRegistry.from_config(app_config)
+    store = MemoryCandleStore(history_depth=app_config.history_depth)
+    blackout_filter = NewsBlackoutFilter(app_config.blackout_windows)
+    session_manager = SessionManager()
+
+    try:
+        db_path = resolve_db_path(app_config.params)
+        sqlite_store = SQLiteStore(db_path)
+    except Exception as exc:
+        LOGGER.exception("SQLite initialization failed: %s", exc)
+        await notifier.notify_critical("SQLite initialization failed", str(exc))
+        await notifier.close()
+        return 3
+
+    LOGGER.info("SQLite storage path: %s", sqlite_store.path)
+
+    stats_engine = StatsEngine()
+    trade_simulator = TradeSimulator(
+        params=app_config.params,
+        logger=logging.getLogger("trade_simulator"),
+        storage=sqlite_store,
+    )
+
+    signal_engine = SignalEngine(
+        registry=registry,
+        store=store,
+        params=app_config.params,
+        blackout_filter=blackout_filter,
+        logger=logging.getLogger("signal_engine"),
+    )
+
+    async def safe_db_write(action: str, fn: Any, *fn_args: Any) -> None:
+        try:
+            fn(*fn_args)
+        except Exception as exc:
+            LOGGER.exception("DB write failed action=%s error=%s", action, exc)
+            await notifier.notify_critical("Database write failure", f"{action}: {exc}")
+
+    async def on_market_data_status(status: str, payload: dict[str, Any]) -> None:
+        if status == "disconnect":
+            details = f"attempt={payload.get('attempt')} error={payload.get('error', 'unknown')}"
+            await notifier.notify_critical("Market data disconnected", details)
+            return
+
+        if status == "connected" and payload.get("mode") == "t_invest":
+            if payload.get("recovered"):
+                await notifier.notify_text(
+                    f"API feed recovered on attempt {payload.get('attempt')}",
+                    category="feed_recovered",
+                )
+            return
+
+    mode = resolve_market_data_mode(app_config.params)
+    market_data_params = app_config.params.get("market_data", {})
+    if not isinstance(market_data_params, dict):
+        market_data_params = {}
+
+    token = os.getenv("INVEST_TOKEN", "")
+    if mode == "t_invest" and not token.strip():
+        LOGGER.error("MARKET_DATA_MODE=t_invest but INVEST_TOKEN is empty; switching to demo mode")
+        await notifier.notify_critical(
+            "Live mode disabled",
+            "MARKET_DATA_MODE=t_invest but INVEST_TOKEN is empty. Switched to demo mode.",
+        )
+        mode = "demo"
+
+    client = create_market_data_client(
+        mode=mode,
+        token=token,
+        registry=registry,
+        params=market_data_params,
+        timeframe=app_config.default_timeframe,
+        logger=logging.getLogger("market_data"),
+        status_handler=on_market_data_status,
+    )
+
+    LOGGER.info("Market data mode: %s", mode)
+
+    if notifier.enabled and notifier.send_startup_message:
+        await notifier.notify_text(
+            f"Bot started. Mode={mode}. Enabled instruments={len(registry.enabled())}",
+            category="startup",
+        )
+
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop_event.set)
+        except NotImplementedError:
+            pass
+
+    updates_seen = 0
+
+    async def on_candle(candle: Candle) -> None:
+        nonlocal updates_seen
+        try:
+            upsert_result = store.upsert(candle)
+        except CandleValidationError as exc:
+            LOGGER.error("Rejected malformed candle: %s", exc)
+            await notifier.notify_critical("Malformed candle rejected", str(exc))
+            return
+
+        if upsert_result == "ignored":
+            LOGGER.warning(
+                "Ignored out-of-history candle %s %s %s",
+                candle.instrument,
+                candle.timeframe,
+                candle.datetime.isoformat(),
+            )
+            return
+
+        updates_seen += 1
+
+        try:
+            engine_result = signal_engine.process_candle(
+                instrument=candle.instrument,
+                timeframe=candle.timeframe,
+            )
+        except Exception as exc:
+            LOGGER.exception("Signal engine failed: %s", exc)
+            await notifier.notify_critical("Signal engine failure", str(exc))
+            return
+
+        for signal_obj in engine_result.accepted_signals:
+            await safe_db_write("save_signal", sqlite_store.save_signal, signal_obj)
+            stats_engine.record_signal(instrument=signal_obj.instrument, strategy=signal_obj.strategy)
+            registration_events = trade_simulator.register_signal(signal_obj, timeframe=candle.timeframe)
+            for event in registration_events:
+                stats_engine.record_event(event)
+                trade_for_event = trade_simulator.get_trade(event.trade_id)
+                if event.event_type != "new_signal":
+                    await notifier.notify_trade_event(event, trade_for_event)
+
+            await notifier.notify_signal(signal_obj)
+
+            LOGGER.info(
+                "Signal accepted | instrument=%s strategy=%s regime=%s direction=%s entry=%.5f sl=%.5f tp1=%.5f tp2=%.5f meta=%s",
+                signal_obj.instrument,
+                signal_obj.strategy,
+                signal_obj.regime.value,
+                signal_obj.direction.value,
+                signal_obj.entry,
+                signal_obj.stop_loss,
+                signal_obj.tp1,
+                signal_obj.tp2,
+                signal_obj.metadata,
+            )
+
+        instrument_meta = registry.get(candle.instrument)
+        session_state = session_manager.get_state(instrument_meta, candle.datetime)
+        blackout_active, blackout_reason = blackout_filter.is_blocked(candle.datetime)
+
+        try:
+            trade_events = trade_simulator.process_candle(
+                candle=candle,
+                session_active=session_state.is_active,
+                blackout_active=blackout_active,
+                blackout_reason=blackout_reason,
+            )
+        except Exception as exc:
+            LOGGER.exception("Trade simulator failure: %s", exc)
+            await notifier.notify_critical("Trade simulator failure", str(exc))
+            return
+
+        for event in trade_events:
+            stats_engine.record_event(event)
+            trade = trade_simulator.get_trade(event.trade_id)
+            await notifier.notify_trade_event(event, trade)
+            if event.event_type in CLOSE_EVENTS and trade is not None:
+                stats_engine.record_trade_closed(trade)
+
+        if updates_seen % max(1, args.print_every) == 0:
+            recent = store.get_recent(candle.instrument, candle.timeframe, limit=3)
+            rows = [
+                {
+                    "time": item.datetime.isoformat(),
+                    "o": round(item.open, 5),
+                    "h": round(item.high, 5),
+                    "l": round(item.low, 5),
+                    "c": round(item.close, 5),
+                    "v": round(item.volume, 2),
+                }
+                for item in recent
+            ]
+            summary = stats_engine.summary()["global"]
+            LOGGER.info(
+                "Recent candles %s/%s regime=%s rejected=%d open_trades=%d closed=%d net=%.5f rows=%s",
+                candle.instrument,
+                candle.timeframe,
+                engine_result.regime.value if engine_result.regime else "N/A",
+                len(engine_result.rejected_reasons),
+                trade_simulator.open_trades_count(),
+                int(summary["closed"]),
+                float(summary["net_pnl"]),
+                rows,
+            )
+
+    tasks: list[asyncio.Task[Any]] = [
+        asyncio.create_task(client.run(on_candle=on_candle, stop_event=stop_event), name="market-data")
+    ]
+
+    if notifier.enabled and notifier.summary_interval_seconds > 0:
+
+        async def _summary_loop() -> None:
+            while not stop_event.is_set():
+                try:
+                    await asyncio.wait_for(
+                        stop_event.wait(),
+                        timeout=notifier.summary_interval_seconds,
+                    )
+                except asyncio.TimeoutError:
+                    await notifier.notify_daily_summary(
+                        stats_engine.summary(),
+                        trade_simulator.open_trades_count(),
+                    )
+
+        tasks.append(asyncio.create_task(_summary_loop(), name="telegram-summary"))
+
+    if args.run_seconds > 0:
+
+        async def _auto_stop() -> None:
+            await asyncio.sleep(args.run_seconds)
+            LOGGER.info("Auto-stop timeout reached (%d seconds)", args.run_seconds)
+            stop_event.set()
+
+        tasks.append(asyncio.create_task(_auto_stop(), name="auto-stop"))
+
+    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+    for finished in done:
+        exc = finished.exception()
+        if exc:
+            LOGGER.error(
+                "Task %s failed: %s",
+                finished.get_name(),
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            await notifier.notify_critical(
+                "Runtime task failed",
+                f"task={finished.get_name()} error={exc}",
+            )
+            stop_event.set()
+
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+
+    stats_summary = stats_engine.summary()
+    await safe_db_write("save_stats_snapshot", sqlite_store.save_stats_snapshot, datetime.now(tz=timezone.utc), stats_summary)
+    sqlite_store.close()
+
+    stats = store.stats()
+    LOGGER.info(
+        "Application stop: updates=%d instruments=%d streams=%d candles=%d",
+        updates_seen,
+        stats.instruments,
+        stats.streams,
+        stats.candles,
+    )
+    LOGGER.info("Final stats summary: %s", stats_summary)
+
+    if notifier.enabled and notifier.send_shutdown_summary:
+        await notifier.notify_daily_summary(stats_summary, trade_simulator.open_trades_count())
+
+    with contextlib.suppress(Exception):
+        await notifier.close()
+
+    return 0
+
+
+def main() -> None:
+    exit_code = asyncio.run(run())
+    raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_loop())
-    except KeyboardInterrupt:
-        print("\nБот остановлен пользователем.")
+    main()

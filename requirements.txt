@@ -1,4 +1,6 @@
-aiohttp==3.13.5
+﻿aiohttp==3.13.5
 pandas==3.0.2
+PyYAML==6.0.2
 
+# Optional T-Invest SDK:
 # pip install t-tech-investments --index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple

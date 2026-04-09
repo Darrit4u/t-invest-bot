@@ -6,3 +6,8 @@ __pycache__
 __pycache__/
 
 signals.db
+
+logs
+logs/
+
+config/*.yaml

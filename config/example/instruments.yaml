@@ -1,0 +1,61 @@
+﻿history_depth: 500
+default_timeframe: "1min"
+
+session_rules:
+  US_DAY:
+    timezone: "America/New_York"
+    start: "09:30"
+    end: "16:00"
+  MOSCOW_DAY:
+    timezone: "Europe/Moscow"
+    start: "10:00"
+    end: "23:50"
+
+instruments:
+  ES:
+    enabled: true
+    ticker: "ES"
+    class_code: "SPBFUT"
+    uid: ""
+    figi: ""
+    tick_size: 0.25
+    tick_value: 12.5
+    lot: 1
+    sessions:
+      - MOSCOW_DAY
+
+  SILVER:
+    enabled: true
+    ticker: "SILVER"
+    class_code: "SPBFUT"
+    uid: ""
+    figi: ""
+    tick_size: 0.01
+    tick_value: 5.0
+    lot: 1
+    sessions:
+      - MOSCOW_DAY
+
+  BRENT:
+    enabled: true
+    ticker: "BRENT"
+    class_code: "SPBFUT"
+    uid: ""
+    figi: ""
+    tick_size: 0.01
+    tick_value: 10.0
+    lot: 1
+    sessions:
+      - MOSCOW_DAY
+
+  NG:
+    enabled: true
+    ticker: "NG"
+    class_code: "SPBFUT"
+    uid: ""
+    figi: ""
+    tick_size: 0.001
+    tick_value: 10.0
+    lot: 1
+    sessions:
+      - MOSCOW_DAY
