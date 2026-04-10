@@ -21,7 +21,7 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
         if len(candles) < lookback + 2:
             return None
 
-        if not self._local_balance_valid(context):
+        if not self._local_balance_valid(context, lookback=lookback):
             return None
 
         reference_window = candles[-(lookback + 2) : -2]
@@ -34,7 +34,7 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
 
         return self._try_long(context, reference_window, sweep, confirm)
 
-    def _local_balance_valid(self, context: StrategyContext) -> bool:
+    def _local_balance_valid(self, context: StrategyContext, *, lookback: int) -> bool:
         atr = context.indicators.atr
         if atr <= 0:
             return False
@@ -48,7 +48,8 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
         if abs(context.indicators.vwap_slope) > self._float("vwap_slope_abs_max_atr", 0.04) * atr:
             return False
 
-        recent = context.candles[-20:]
+        recent_window = max(lookback, 20)
+        recent = context.candles[-recent_window:]
         day_range = max(item.high for item in recent) - min(item.low for item in recent)
         if day_range > self._float("day_range_max_atr", 3.0) * atr:
             return False

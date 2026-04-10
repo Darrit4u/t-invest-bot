@@ -54,6 +54,48 @@ class StrategyConditionTests(unittest.TestCase):
         ctx = build_context(candles=candles, regime=MarketRegime.COMPRESSION, indicators=indicators)
         self.assertIsNotNone(strategy.evaluate(ctx))
 
+    def test_compression_breakout_retest_uses_max_retest_bars(self) -> None:
+        strategy = CompressionBreakoutStrategy(
+            params={
+                "compression_window_bars": 12,
+                "range_min_atr": 0.2,
+                "range_max_atr": 3.0,
+                "ema_distance_max_atr": 0.2,
+                "vwap_slope_abs_max_atr": 0.2,
+                "overlap_ratio_min": 0.5,
+                "volume_floor_mult": 0.5,
+                "breakout_body_min_atr": 0.2,
+                "breakout_volume_mult": 1.0,
+                "late_breakout_extension_atr": 0.8,
+                "large_breakout_retest_threshold_atr": 0.4,
+                "max_retest_bars": 2,
+                "retest_tolerance_atr": 0.15,
+            }
+        )
+        candles = [make_candle(i, open_=100.0, close=100.05, high=100.25, low=99.9, volume=900) for i in range(13)]
+        breakout = make_candle(13, open_=100.1, close=100.65, high=100.75, low=100.0, volume=1400)
+        mid = make_candle(14, open_=100.62, close=100.68, high=100.8, low=100.55, volume=950)
+        confirm = make_candle(15, open_=100.62, close=100.72, high=100.78, low=100.22, volume=1200)
+        candles.extend([breakout, mid, confirm])
+
+        indicators = build_indicator(
+            timestamp=confirm.datetime,
+            close=confirm.close,
+            vwap=100.2,
+            ema_fast=100.25,
+            ema_slow=100.21,
+            atr=1.0,
+            rolling_volume_avg=1000,
+            ema_distance=0.04,
+            vwap_slope=0.01,
+            overlap_ratio=0.8,
+        )
+        ctx = build_context(candles=candles, regime=MarketRegime.COMPRESSION, indicators=indicators)
+        signal = strategy.evaluate(ctx)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.metadata.get("bars_since_breakout"), 2)
+
     def test_liquidity_sweep_reversal_generates_signal(self) -> None:
         strategy = LiquiditySweepReversalStrategy(params={})
 

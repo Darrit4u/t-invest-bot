@@ -93,70 +93,87 @@ class CompressionBreakoutStrategy(BaseStrategy):
 
     def _evaluate_retest(self, context: StrategyContext, bars: int) -> StrategySignal | None:
         atr = context.indicators.atr
-        if len(context.candles) < bars + 3:
+        max_retest_bars = max(1, self._int("max_retest_bars", 2))
+        if len(context.candles) < bars + max_retest_bars + 1:
             return None
 
-        window = context.candles[-(bars + 2) : -2]
-        breakout = context.candles[-2]
         confirm = context.candles[-1]
-
-        range_high = max(item.high for item in window)
-        range_low = min(item.low for item in window)
-        range_width = range_high - range_low
-        if not self._compression_is_valid(context, window, range_width):
-            return None
-
-        body = abs(breakout.close - breakout.open)
         large_threshold = self._float("large_breakout_retest_threshold_atr", 0.90) * atr
-        if body <= large_threshold:
-            return None
-
+        breakout_volume_min = self._float("breakout_volume_mult", 1.25)
         tolerance = self._float("retest_tolerance_atr", 0.10) * atr
-        volume_ratio = confirm.volume / max(context.indicators.rolling_volume_avg, 1e-9)
+        confirm_volume_ratio = confirm.volume / max(context.indicators.rolling_volume_avg, 1e-9)
 
-        if breakout.close > range_high:
-            if confirm.low > range_high + tolerance:
-                return None
-            if confirm.close <= range_high:
-                return None
-            if confirm.close <= confirm.open:
-                return None
-            if volume_ratio < self._float("breakout_volume_mult", 1.25) * 0.8:
-                return None
-            return self._build_signal(
-                context=context,
-                direction=SignalDirection.LONG,
-                entry=confirm.close,
-                range_high=range_high,
-                range_low=range_low,
-                range_width=range_width,
-                breakout_body_atr=body / atr,
-                volume_ratio=volume_ratio,
-                entry_mode="RETEST_CONFIRMATION_CLOSE",
-                retest_required=True,
-            )
+        candles = context.candles
+        for bars_since_breakout in range(1, max_retest_bars + 1):
+            breakout_pos = len(candles) - 1 - bars_since_breakout
+            window_start = breakout_pos - bars
+            if window_start < 0:
+                continue
 
-        if breakout.close < range_low:
-            if confirm.high < range_low - tolerance:
-                return None
-            if confirm.close >= range_low:
-                return None
-            if confirm.close >= confirm.open:
-                return None
-            if volume_ratio < self._float("breakout_volume_mult", 1.25) * 0.8:
-                return None
-            return self._build_signal(
-                context=context,
-                direction=SignalDirection.SHORT,
-                entry=confirm.close,
-                range_high=range_high,
-                range_low=range_low,
-                range_width=range_width,
-                breakout_body_atr=body / atr,
-                volume_ratio=volume_ratio,
-                entry_mode="RETEST_CONFIRMATION_CLOSE",
-                retest_required=True,
-            )
+            window = candles[window_start:breakout_pos]
+            breakout = candles[breakout_pos]
+
+            range_high = max(item.high for item in window)
+            range_low = min(item.low for item in window)
+            range_width = range_high - range_low
+            if not self._compression_is_valid(context, window, range_width):
+                continue
+
+            body = abs(breakout.close - breakout.open)
+            if body <= large_threshold:
+                continue
+
+            breakout_volume_ratio = breakout.volume / max(context.indicators.rolling_volume_avg, 1e-9)
+            if breakout_volume_ratio < breakout_volume_min:
+                continue
+
+            if breakout.close > range_high:
+                if confirm.low > range_high + tolerance:
+                    continue
+                if confirm.close <= range_high:
+                    continue
+                if confirm.close <= confirm.open:
+                    continue
+                if confirm_volume_ratio < breakout_volume_min * 0.8:
+                    continue
+                return self._build_signal(
+                    context=context,
+                    direction=SignalDirection.LONG,
+                    entry=confirm.close,
+                    range_high=range_high,
+                    range_low=range_low,
+                    range_width=range_width,
+                    breakout_body_atr=body / atr,
+                    volume_ratio=confirm_volume_ratio,
+                    breakout_volume_ratio=breakout_volume_ratio,
+                    entry_mode="RETEST_CONFIRMATION_CLOSE",
+                    retest_required=True,
+                    bars_since_breakout=bars_since_breakout,
+                )
+
+            if breakout.close < range_low:
+                if confirm.high < range_low - tolerance:
+                    continue
+                if confirm.close >= range_low:
+                    continue
+                if confirm.close >= confirm.open:
+                    continue
+                if confirm_volume_ratio < breakout_volume_min * 0.8:
+                    continue
+                return self._build_signal(
+                    context=context,
+                    direction=SignalDirection.SHORT,
+                    entry=confirm.close,
+                    range_high=range_high,
+                    range_low=range_low,
+                    range_width=range_width,
+                    breakout_body_atr=body / atr,
+                    volume_ratio=confirm_volume_ratio,
+                    breakout_volume_ratio=breakout_volume_ratio,
+                    entry_mode="RETEST_CONFIRMATION_CLOSE",
+                    retest_required=True,
+                    bars_since_breakout=bars_since_breakout,
+                )
 
         return None
 
@@ -193,8 +210,10 @@ class CompressionBreakoutStrategy(BaseStrategy):
         range_width: float,
         breakout_body_atr: float,
         volume_ratio: float,
+        breakout_volume_ratio: float | None = None,
         entry_mode: str,
         retest_required: bool,
+        bars_since_breakout: int = 0,
     ) -> StrategySignal:
         atr = context.indicators.atr
         stop_distance = max(
@@ -226,9 +245,11 @@ class CompressionBreakoutStrategy(BaseStrategy):
                 "overlap_ratio": context.indicators.overlap_ratio,
                 "breakout_body_atr": breakout_body_atr,
                 "volume_ratio": volume_ratio,
+                "breakout_volume_ratio": breakout_volume_ratio,
                 "range_high": range_high,
                 "range_low": range_low,
                 "range_width": range_width,
                 "retest_required": retest_required,
+                "bars_since_breakout": bars_since_breakout,
             },
         )

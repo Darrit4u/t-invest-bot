@@ -14,6 +14,33 @@ class _DummyLogger:
 
 
 class TradeEdgeCaseTests(unittest.TestCase):
+    def test_next_bar_open_does_not_activate_on_signal_candle(self) -> None:
+        sim = TradeSimulator(params={"trade_simulator": {}}, logger=_DummyLogger(), storage=None)
+        signal = build_signal(direction=SignalDirection.LONG, entry=100, stop_loss=99, tp1=101, tp2=102)
+        events = sim.register_signal(signal, timeframe="1min")
+        trade_id = events[0].trade_id
+
+        same_candle = make_candle(0, open_=99.5, high=100.4, low=99.4, close=100.2)
+        out_same = sim.process_candle(
+            candle=same_candle,
+            session_active=True,
+            blackout_active=False,
+            blackout_reason=None,
+        )
+        self.assertEqual(out_same, tuple())
+
+        next_candle = make_candle(1, open_=100.3, high=100.7, low=100.1, close=100.6)
+        out_next = sim.process_candle(
+            candle=next_candle,
+            session_active=True,
+            blackout_active=False,
+            blackout_reason=None,
+        )
+        self.assertEqual([e.event_type for e in out_next], ["activated"])
+        trade = sim.get_trade(trade_id)
+        assert trade is not None
+        self.assertAlmostEqual(trade.entry_fill_price, 100.3, places=6)
+
     def test_duplicate_and_partial_candles_update_store(self) -> None:
         store = MemoryCandleStore(history_depth=20)
         c1 = make_candle(0, open_=100, close=100.2, instrument="ES")

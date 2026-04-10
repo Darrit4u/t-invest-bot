@@ -211,6 +211,12 @@ class TradeSimulator:
         blackout_active: bool,
         blackout_reason: str | None,
     ) -> list[TradeEvent]:
+        entry_mode = str(trade.metadata.get("entry_mode", "")).strip().upper()
+        if candle.datetime < trade.created_at:
+            return []
+        if entry_mode == "NEXT_BAR_OPEN" and candle.datetime <= trade.created_at:
+            return []
+
         trade.bars_waiting += 1
         trade.updated_at = candle.datetime
 

@@ -213,7 +213,7 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                 had_disconnect = False
             except asyncio.CancelledError as exc:
                 if stop_event.is_set():
-                    raise
+                    return
 
                 self._logger.warning(
                     "T-Invest stream cancelled unexpectedly (attempt #%d): %s",
@@ -335,7 +335,8 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                     request,
                     market_data_pb2.MarketDataServerSideStreamRequest(),
                 )
-                stream = client.market_data_stream.stub.MarketDataServerSideStream(
+                stream = _open_market_data_server_side_stream(
+                    rpc=client.market_data_stream.stub.MarketDataServerSideStream,
                     request=protobuf_request,
                     metadata=client.market_data_stream.metadata,
                 )
@@ -381,7 +382,7 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                 )
                 if stop_waiter in done:
                     read_task.cancel()
-                    with contextlib.suppress(Exception):
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
                         await read_task
                     return
 
@@ -395,6 +396,40 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                     if not task.done():
                         task.cancel()
                 await asyncio.gather(read_task, stop_waiter, return_exceptions=True)
+
+
+def _open_market_data_server_side_stream(*, rpc: Any, request: Any, metadata: Any) -> Any:
+    """
+    Open market-data stream across SDK/gRPC variants.
+
+    Preferred path is unary->stream RPC with `request`.
+    Some environments require positional request, while legacy variants can require
+    request iterator style.
+    """
+
+    attempts = (
+        lambda: rpc(request=request, metadata=metadata),
+        lambda: rpc(request, metadata=metadata),
+        lambda: rpc(
+            request_iterator=_single_request_iterator(request=request),
+            metadata=metadata,
+        ),
+    )
+    last_error: Exception | None = None
+    for attempt in attempts:
+        try:
+            return attempt()
+        except TypeError as exc:
+            last_error = exc
+            continue
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Failed to open market data stream")
+
+
+async def _single_request_iterator(*, request: Any):
+    yield request
 
 
 def _map_timeframe(timeframe: str, subscription_interval_cls: Any) -> Any:

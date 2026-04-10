@@ -301,6 +301,9 @@ python scripts/fill_instruments_meta.py --help
 | `pullback_min_atr` | Мин. глубина pullback в ATR |
 | `pullback_max_atr` | Макс. глубина pullback в ATR |
 | `pullback_location_mode` | Тип зоны pullback (`ANY`, и др.) |
+| `confirmation_body_min_atr` | Мин. размер тела confirm-свечи в ATR |
+| `mtf_alignment_enabled` | Включить фильтр направления старшего ТФ (агрегация из текущего ТФ) |
+| `mtf_factor` / `mtf_fast_ema` / `mtf_slow_ema` | Параметры MTF-фильтра: фактор агрегации и EMA |
 | `stop_buffer_atr` | Буфер SL в ATR |
 | `tp1_r` | TP1 в R |
 | `tp2_r` | TP2 в R |
@@ -346,7 +349,7 @@ python scripts/fill_instruments_meta.py --help
 | `stop_buffer_atr` | Буфер стопа в ATR |
 | `tp1_r` | TP1 в R |
 | `tp2_r` | TP2 в R |
-| `entry_mode` | Режим входа (`NEXT_BAR_OPEN` и т.д.) |
+| `entry_mode` | Режим входа (`NEXT_BAR_OPEN`, `CONFIRMATION_CLOSE` и т.д.) |
 
 ## Конфигурация `config/news_blackout.yaml`
 

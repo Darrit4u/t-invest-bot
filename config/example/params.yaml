@@ -27,17 +27,17 @@ indicator_engine:
   swing_window: 5
 
 regime_classifier:
-  trend_ema_distance_atr: 0.16
-  trend_vwap_slope_atr: 0.02
-  trend_crossing_max: 4
-  compression_range_min_atr: 0.60
-  compression_range_max_atr: 2.20
-  compression_ema_distance_atr: 0.12
-  compression_vwap_slope_abs_atr: 0.05
-  compression_overlap_min: 0.58
-  balance_crossing_min: 4
-  balance_ema_distance_atr: 0.14
-  balance_vwap_slope_abs_atr: 0.05
+  trend_ema_distance_atr: 0.15
+  trend_vwap_slope_atr: 0.018
+  trend_crossing_max: 5
+  compression_range_min_atr: 0.55
+  compression_range_max_atr: 2.50
+  compression_ema_distance_atr: 0.14
+  compression_vwap_slope_abs_atr: 0.06
+  compression_overlap_min: 0.54
+  balance_crossing_min: 3
+  balance_ema_distance_atr: 0.16
+  balance_vwap_slope_abs_atr: 0.06
 
 signal_filter:
   commission_roundtrip: 0.0008
@@ -46,8 +46,8 @@ signal_filter:
 trade_simulator:
   commission_per_side: 0.0004
   tp1_size: 0.5
-  max_wait_bars: 6
-  max_trade_bars: 20
+  max_wait_bars: 8
+  max_trade_bars: 30
   move_stop_to_breakeven: true
   close_active_on_blackout: false
   intrabar_stop_priority: true
@@ -65,52 +65,57 @@ telegram:
 strategy_params:
   trend_pullback_vwap_ema:
     impulse_bars: 3
-    impulse_atr_mult: 0.9
+    impulse_atr_mult: 0.75
     min_bullish_bars_in_impulse: 2
     min_bearish_bars_in_impulse: 2
-    volume_impulse_mult: 0.95
-    min_vwap_extension_atr: 0.15
-    max_vwap_extension_atr: 2.20
+    volume_impulse_mult: 0.90
+    min_vwap_extension_atr: 0.12
+    max_vwap_extension_atr: 2.40
     pullback_min_atr: 0.10
-    pullback_max_atr: 1.00
-    pullback_location_mode: "ANY"
-    stop_buffer_atr: 0.15
+    pullback_max_atr: 0.90
+    pullback_location_mode: "VWAP_OR_EMA_FAST"
+    confirmation_body_min_atr: 0.06
+    mtf_alignment_enabled: true
+    mtf_factor: 3
+    mtf_fast_ema: 8
+    mtf_slow_ema: 21
+    stop_buffer_atr: 0.18
     tp1_r: 1.0
-    tp2_r: 2.0
+    tp2_r: 2.2
     entry_timing_mode: "NEXT_BAR_OPEN"
 
   compression_breakout:
     compression_window_bars: 12
-    range_max_atr: 2.1
-    range_min_atr: 0.6
-    ema_distance_max_atr: 0.12
-    vwap_slope_abs_max_atr: 0.05
-    overlap_ratio_min: 0.58
-    volume_floor_mult: 0.75
-    breakout_body_min_atr: 0.25
-    breakout_volume_mult: 1.0
-    late_breakout_extension_atr: 0.35
-    large_breakout_retest_threshold_atr: 0.85
-    stop_atr: 0.55
-    stop_range_factor: 0.50
-    tp1_r: 1.0
-    tp2_r: 2.2
-    max_retest_bars: 2
-    retest_tolerance_atr: 0.12
+    range_max_atr: 2.4
+    range_min_atr: 0.55
+    ema_distance_max_atr: 0.14
+    vwap_slope_abs_max_atr: 0.06
+    overlap_ratio_min: 0.55
+    volume_floor_mult: 0.70
+    breakout_body_min_atr: 0.22
+    breakout_volume_mult: 1.15
+    late_breakout_extension_atr: 0.45
+    large_breakout_retest_threshold_atr: 0.75
+    stop_atr: 0.60
+    stop_range_factor: 0.45
+    tp1_r: 1.1
+    tp2_r: 2.4
+    max_retest_bars: 3
+    retest_tolerance_atr: 0.15
 
   liquidity_sweep_reversal:
-    reference_lookback_bars: 20
-    balance_crosses_vwap_min: 4
-    ema_distance_max_atr: 0.12
-    vwap_slope_abs_max_atr: 0.05
-    day_range_max_atr: 4.0
-    impulse_block_atr: 2.0
-    sweep_min_atr: 0.08
-    sweep_max_atr: 0.90
-    wick_min_share: 0.30
-    sweep_volume_mult: 1.0
-    return_close_distance_atr: 0.25
-    stop_buffer_atr: 0.12
-    tp1_r: 0.8
-    tp2_r: 1.5
-    entry_mode: "NEXT_BAR_OPEN"
+    reference_lookback_bars: 24
+    balance_crosses_vwap_min: 5
+    ema_distance_max_atr: 0.11
+    vwap_slope_abs_max_atr: 0.045
+    day_range_max_atr: 3.5
+    impulse_block_atr: 1.8
+    sweep_min_atr: 0.10
+    sweep_max_atr: 0.70
+    wick_min_share: 0.38
+    sweep_volume_mult: 1.15
+    return_close_distance_atr: 0.18
+    stop_buffer_atr: 0.15
+    tp1_r: 1.0
+    tp2_r: 1.8
+    entry_mode: "CONFIRMATION_CLOSE"
