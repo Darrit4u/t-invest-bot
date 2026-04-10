@@ -203,6 +203,26 @@ python scripts/fill_instruments_meta.py --help
 
 ## Конфигурация `config/params.yaml`
 
+### Профили A/B
+
+Готовые профили лежат в:
+- `config/profiles/params.conservative.yaml`
+- `config/profiles/params.balanced.yaml`
+- `config/profiles/params.active.yaml`
+
+Дубликаты для шаблонов/репозитория:
+- `config/example/profiles/params.conservative.yaml`
+- `config/example/profiles/params.balanced.yaml`
+- `config/example/profiles/params.active.yaml`
+
+Быстро переключить активный профиль локально:
+
+```powershell
+Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
+```
+
+Замените `balanced` на `conservative` или `active`.
+
 ### Общие настройки
 
 | Ключ | За что отвечает |
