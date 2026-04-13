@@ -95,6 +95,9 @@ class TradeSimulator:
         self._move_stop_to_breakeven = bool(sim_cfg.get("move_stop_to_breakeven", True))
         self._close_active_on_blackout = bool(sim_cfg.get("close_active_on_blackout", False))
         self._intrabar_stop_priority = bool(sim_cfg.get("intrabar_stop_priority", True))
+        self._close_profitable_on_session_end = bool(
+            sim_cfg.get("close_profitable_on_session_end", False)
+        )
 
         self._trades: dict[str, SimulatedTrade] = {}
         self._open_by_instrument: dict[str, set[str]] = {}
@@ -289,6 +292,17 @@ class TradeSimulator:
         trade.updated_at = candle.datetime
 
         if not session_active:
+            if self._close_profitable_on_session_end:
+                if self._would_close_in_profit(trade=trade, price=candle.close):
+                    return self._force_close(
+                        trade=trade,
+                        when=candle.datetime,
+                        price=candle.close,
+                        status=TradeStatus.CANCELLED_BY_SESSION_END,
+                        reason="session_end_take_profit",
+                        event_type="cancelled_by_session_end",
+                    )
+                return []
             return self._force_close(
                 trade=trade,
                 when=candle.datetime,
@@ -474,6 +488,15 @@ class TradeSimulator:
         reference_entry = trade.entry_fill_price if trade.entry_fill_price is not None else trade.entry
         risk = abs(reference_entry - trade.stop_loss)
         trade.r_multiple = trade.net_pnl / max(risk, 1e-9)
+
+    def _would_close_in_profit(self, *, trade: SimulatedTrade, price: float) -> bool:
+        if trade.entry_fill_price is None or trade.remaining_qty <= 0:
+            return False
+        sign = 1.0 if trade.direction == SignalDirection.LONG else -1.0
+        unrealized = sign * (price - trade.entry_fill_price) * trade.remaining_qty
+        projected_gross = trade.gross_pnl + unrealized
+        projected_fees = trade.fees_paid + (price * trade.remaining_qty * self._commission_per_side)
+        return (projected_gross - projected_fees) > 0.0
 
     @staticmethod
     def _tp1_hit(*, trade: SimulatedTrade, candle: Candle) -> bool:

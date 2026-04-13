@@ -9,5 +9,6 @@ signals.db*
 
 logs
 logs/
+backtest_reports
 
 config/*.yaml

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from core.models import MarketRegime, SignalDirection, StrategyContext, StrategySignal
 from strategies.base import BaseStrategy
+from strategies.mtf import mtf_alignment
 
 
 class LiquiditySweepReversalStrategy(BaseStrategy):
@@ -30,9 +33,33 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
 
         short_signal = self._try_short(context, reference_window, sweep, confirm)
         if short_signal is not None:
-            return short_signal
+            return self._apply_mtf_alignment(context=context, signal=short_signal)
 
-        return self._try_long(context, reference_window, sweep, confirm)
+        long_signal = self._try_long(context, reference_window, sweep, confirm)
+        if long_signal is None:
+            return None
+        return self._apply_mtf_alignment(context=context, signal=long_signal)
+
+    def _apply_mtf_alignment(
+        self,
+        *,
+        context: StrategyContext,
+        signal: StrategySignal,
+    ) -> StrategySignal | None:
+        mtf_ok, mtf_meta = mtf_alignment(
+            enabled=self._bool("use_mtf_filter", False),
+            candles=context.candles,
+            source_timeframe=context.timeframe,
+            direction=signal.direction,
+            trend_timeframe=self._str("trend_timeframe", "1hour"),
+            setup_timeframe=self._str("setup_timeframe", "15min"),
+            fast_ema=max(2, self._int("mtf_fast_ema", 8)),
+            slow_ema=max(3, self._int("mtf_slow_ema", 21)),
+            slope_bars=max(1, self._int("mtf_slope_bars", 2)),
+        )
+        if not mtf_ok:
+            return None
+        return replace(signal, metadata=dict(signal.metadata) | mtf_meta)
 
     def _local_balance_valid(self, context: StrategyContext, *, lookback: int) -> bool:
         atr = context.indicators.atr

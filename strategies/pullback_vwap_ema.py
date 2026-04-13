@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from statistics import mean
+from typing import Any
 
 from core.models import MarketRegime, SignalDirection, StrategyContext, StrategySignal
 from strategies.base import BaseStrategy
+from strategies.mtf import mtf_alignment
 
 
 class TrendPullbackVWAPEMAStrategy(BaseStrategy):
@@ -45,27 +47,39 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         else:
             return None
 
-        if self._mtf_alignment_enabled():
-            mtf_bias = _mtf_bias(
-                candles=candles,
-                factor=max(2, self._int("mtf_factor", 3)),
-                fast=max(2, self._int("mtf_fast_ema", 8)),
-                slow=max(3, self._int("mtf_slow_ema", 21)),
-            )
-            if mtf_bias is None or mtf_bias != direction:
-                return None
+        mtf_ok, mtf_meta = mtf_alignment(
+            enabled=self._bool("use_mtf_filter", False),
+            candles=candles,
+            source_timeframe=context.timeframe,
+            direction=direction,
+            trend_timeframe=self._str("trend_timeframe", "1hour"),
+            setup_timeframe=self._str("setup_timeframe", "15min"),
+            fast_ema=max(2, self._int("mtf_fast_ema", 8)),
+            slow_ema=max(3, self._int("mtf_slow_ema", 21)),
+            slope_bars=max(1, self._int("mtf_slope_bars", 2)),
+        )
+        if not mtf_ok:
+            return None
 
         impulse = candles[-(impulse_bars + 2) : -2]
         pullback = candles[-2]
         confirm = candles[-1]
 
         if direction == SignalDirection.LONG:
-            return self._evaluate_long(context, impulse, pullback, confirm)
-        return self._evaluate_short(context, impulse, pullback, confirm)
-
-    def _mtf_alignment_enabled(self) -> bool:
-        value = str(self.params.get("mtf_alignment_enabled", "false")).strip().lower()
-        return value in {"1", "true", "yes", "on"}
+            return self._evaluate_long(
+                context=context,
+                impulse=impulse,
+                pullback=pullback,
+                confirm=confirm,
+                mtf_meta=mtf_meta,
+            )
+        return self._evaluate_short(
+            context=context,
+            impulse=impulse,
+            pullback=pullback,
+            confirm=confirm,
+            mtf_meta=mtf_meta,
+        )
 
     def _evaluate_long(
         self,
@@ -73,6 +87,7 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         impulse: list,
         pullback,
         confirm,
+        mtf_meta: dict[str, Any],
     ) -> StrategySignal | None:
         atr = context.indicators.atr
         impulse_atr_mult = self._float("impulse_atr_mult", 0.6)
@@ -144,6 +159,7 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
                 "volume_ratio": volume_ratio,
                 "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
+                **mtf_meta,
             },
         )
 
@@ -153,6 +169,7 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         impulse: list,
         pullback,
         confirm,
+        mtf_meta: dict[str, Any],
     ) -> StrategySignal | None:
         atr = context.indicators.atr
         impulse_atr_mult = self._float("impulse_atr_mult", 0.6)
@@ -224,6 +241,7 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
                 "volume_ratio": volume_ratio,
                 "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
+                **mtf_meta,
             },
         )
 
@@ -236,40 +254,3 @@ def _touched_zone_label(*, touched_vwap: bool, touched_ema: bool) -> str:
     if touched_ema:
         return "EMA_FAST"
     return "NONE"
-
-
-def _mtf_bias(
-    *,
-    candles: list,
-    factor: int,
-    fast: int,
-    slow: int,
-) -> SignalDirection | None:
-    if len(candles) < factor * (slow + 2):
-        return None
-
-    closes: list[float] = []
-    for idx in range(0, len(candles), factor):
-        chunk = candles[idx : idx + factor]
-        if len(chunk) < factor:
-            continue
-        closes.append(chunk[-1].close)
-
-    if len(closes) < slow + 2:
-        return None
-
-    fast_ema = _ema(closes, fast)
-    slow_ema = _ema(closes, slow)
-    if fast_ema > slow_ema:
-        return SignalDirection.LONG
-    if fast_ema < slow_ema:
-        return SignalDirection.SHORT
-    return None
-
-
-def _ema(values: list[float], period: int) -> float:
-    alpha = 2.0 / (period + 1.0)
-    result = values[0]
-    for value in values[1:]:
-        result = (alpha * value) + ((1.0 - alpha) * result)
-    return result

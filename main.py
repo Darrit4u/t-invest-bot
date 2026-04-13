@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from core.config_loader import ConfigError, ConfigLoader
+from core.history_preloader import preload_history
 from core.instrument_registry import InstrumentRegistry
 from core.logger_setup import setup_logging
 from core.market_data import Candle, CandleValidationError, create_market_data_client
@@ -210,6 +211,30 @@ async def run() -> int:
             "MARKET_DATA_MODE=t_invest but INVEST_TOKEN is empty. Switched to demo mode.",
         )
         mode = "demo"
+
+    if mode == "t_invest":
+        try:
+            preload_report = await preload_history(
+                token=token,
+                registry=registry,
+                store=store,
+                params=app_config.params,
+                timeframe=app_config.default_timeframe,
+                logger=LOGGER,
+            )
+            if preload_report.enabled:
+                LOGGER.info(
+                    "History preload | requested_bars=%d attempted=%d with_data=%d processed=%d inserted=%d updated=%d ignored=%d",
+                    preload_report.requested_bars,
+                    preload_report.instruments_attempted,
+                    preload_report.instruments_with_data,
+                    preload_report.processed_candles,
+                    preload_report.inserted,
+                    preload_report.updated,
+                    preload_report.ignored,
+                )
+        except Exception as exc:
+            LOGGER.exception("History preload failed: %s", exc)
 
     client = create_market_data_client(
         mode=mode,

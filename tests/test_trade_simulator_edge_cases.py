@@ -137,6 +137,56 @@ class TradeEdgeCaseTests(unittest.TestCase):
         assert trade is not None
         self.assertEqual(trade.status, TradeStatus.CANCELLED_BY_SESSION_END)
 
+    def test_session_end_closes_only_profitable_when_configured(self) -> None:
+        sim = TradeSimulator(
+            params={"trade_simulator": {"close_profitable_on_session_end": True}},
+            logger=_DummyLogger(),
+            storage=None,
+        )
+        signal = build_signal(direction=SignalDirection.LONG, entry=100, stop_loss=99, tp1=101, tp2=102)
+        events = sim.register_signal(signal, timeframe="1min")
+        trade_id = events[0].trade_id
+
+        activate = make_candle(1, open_=100.0, high=100.2, low=99.8, close=100.1)
+        sim.process_candle(candle=activate, session_active=True, blackout_active=False, blackout_reason=None)
+
+        session_end_profit = make_candle(2, open_=100.5, high=100.7, low=100.3, close=100.6)
+        out = sim.process_candle(
+            candle=session_end_profit,
+            session_active=False,
+            blackout_active=False,
+            blackout_reason=None,
+        )
+        self.assertEqual([e.event_type for e in out], ["cancelled_by_session_end"])
+        trade = sim.get_trade(trade_id)
+        assert trade is not None
+        self.assertEqual(trade.status, TradeStatus.CANCELLED_BY_SESSION_END)
+
+    def test_session_end_keeps_loser_open_when_configured(self) -> None:
+        sim = TradeSimulator(
+            params={"trade_simulator": {"close_profitable_on_session_end": True}},
+            logger=_DummyLogger(),
+            storage=None,
+        )
+        signal = build_signal(direction=SignalDirection.LONG, entry=100, stop_loss=99, tp1=101, tp2=102)
+        events = sim.register_signal(signal, timeframe="1min")
+        trade_id = events[0].trade_id
+
+        activate = make_candle(1, open_=100.0, high=100.2, low=99.8, close=100.1)
+        sim.process_candle(candle=activate, session_active=True, blackout_active=False, blackout_reason=None)
+
+        session_end_loss = make_candle(2, open_=99.6, high=99.8, low=99.2, close=99.4)
+        out = sim.process_candle(
+            candle=session_end_loss,
+            session_active=False,
+            blackout_active=False,
+            blackout_reason=None,
+        )
+        self.assertEqual(out, tuple())
+        trade = sim.get_trade(trade_id)
+        assert trade is not None
+        self.assertEqual(trade.status, TradeStatus.ACTIVATED)
+
     def test_missing_candles_after_reconnect_keeps_lifecycle_valid(self) -> None:
         sim = TradeSimulator(params={"trade_simulator": {}}, logger=_DummyLogger(), storage=None)
         signal = build_signal(direction=SignalDirection.LONG, entry=100, stop_loss=99, tp1=101, tp2=102)

@@ -10,6 +10,12 @@ market_data:
     BRENT: 84.0
     NG: 2.6
 
+history_preload:
+  enabled: true
+  bars: 0
+  extra_bars: 30
+  request_limit_multiplier: 3
+
 news_blackout_file: "news_blackout.yaml"
 max_eval_candles: 350
 
@@ -46,10 +52,11 @@ signal_filter:
 trade_simulator:
   commission_per_side: 0.0004
   tp1_size: 0.5
-  max_wait_bars: 10
-  max_trade_bars: 35
+  max_wait_bars: 14
+  max_trade_bars: 240
   move_stop_to_breakeven: true
-  close_active_on_blackout: false
+  close_active_on_blackout: true
+  close_profitable_on_session_end: true
   intrabar_stop_priority: true
 
 telegram:
@@ -75,10 +82,12 @@ strategy_params:
     pullback_max_atr: 1.10
     pullback_location_mode: "ANY"
     confirmation_body_min_atr: 0.04
-    mtf_alignment_enabled: false
-    mtf_factor: 3
-    mtf_fast_ema: 8
-    mtf_slow_ema: 21
+    use_mtf_filter: true
+    trend_timeframe: "1hour"
+    setup_timeframe: "15min"
+    mtf_fast_ema: 3
+    mtf_slow_ema: 6
+    mtf_slope_bars: 2
     stop_buffer_atr: 0.15
     tp1_r: 0.9
     tp2_r: 1.8
@@ -102,6 +111,12 @@ strategy_params:
     tp2_r: 2.1
     max_retest_bars: 4
     retest_tolerance_atr: 0.20
+    use_mtf_filter: true
+    trend_timeframe: "1hour"
+    setup_timeframe: "15min"
+    mtf_fast_ema: 3
+    mtf_slow_ema: 6
+    mtf_slope_bars: 2
 
   liquidity_sweep_reversal:
     reference_lookback_bars: 18
@@ -119,3 +134,11 @@ strategy_params:
     tp1_r: 0.9
     tp2_r: 1.6
     entry_mode: "NEXT_BAR_OPEN"
+    use_mtf_filter: true
+    trend_timeframe: "1hour"
+    setup_timeframe: "15min"
+    mtf_fast_ema: 3
+    mtf_slow_ema: 6
+    mtf_slope_bars: 2
+
+

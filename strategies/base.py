@@ -33,6 +33,12 @@ class BaseStrategy(ABC):
         value = self.params.get(key, default)
         return str(value)
 
+    def _bool(self, key: str, default: bool) -> bool:
+        value = self.params.get(key, default)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
     def build_signal(
         self,
         *,

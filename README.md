@@ -123,6 +123,38 @@ python scripts/fill_instruments_meta.py --help
 
 Примечание: для фьючерсов `tick_value` (`min_price_increment_amount`) может меняться в течение дня.
 
+## Матричный бэктест стратегий (T-Invest)
+
+Отдельный модуль запускается через:
+
+```powershell
+python scripts/backtest_tinvest.py
+```
+
+Что делает модуль:
+- загружает исторические свечи строго из `t_invest` API;
+- прогоняет матрицу `профиль × стратегия × инструмент`;
+- для каждой тройки ведет последовательный поиск сделок: после закрытия текущей ищет следующий вход;
+- считает статистику и сохраняет артефакты отчета.
+
+Ключевые аргументы:
+
+```powershell
+python scripts/backtest_tinvest.py `
+  --start 2026-01-05 `
+  --end 2026-04-10 `
+  --timeframe 5min `
+  --profiles conservative,balanced,active `
+  --strategies trend_pullback_vwap_ema,compression_breakout,liquidity_sweep_reversal `
+  --workers 6
+```
+
+Результаты сохраняются в папку `backtest_reports/matrix_backtest_<timestamp>/`:
+- `summary_ru.txt` — итоговая сводка на русском;
+- `combo_summary.csv` — метрики по каждой тройке;
+- `signals.csv`, `trades.csv`, `events.csv` — детальные данные;
+- `summary.json` — машинно-читаемая сводка.
+
 ## Режимы работы
 
 - `demo` (по умолчанию): синтетические свечи, токен T-Invest не нужен.
@@ -240,6 +272,15 @@ Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
 | `candle_interval_seconds` | Интервал генерации demo-свечей |
 | `base_prices.<SYMBOL>` | Базовая цена для demo-генератора по инструментам |
 
+### `history_preload`
+
+| Ключ | За что отвечает |
+|---|---|
+| `enabled` | Включить предзагрузку истории свечей перед запуском live-стрима |
+| `bars` | Явно задать целевую глубину предзагрузки (0 = вычислять автоматически) |
+| `extra_bars` | Запас баров поверх расчетного минимума |
+| `request_limit_multiplier` | Множитель лимита запроса к API для надежного добора данных |
+
 ### `storage`
 
 | Ключ | За что отвечает |
@@ -292,6 +333,7 @@ Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
 | `max_trade_bars` | Лимит баров жизни активной сделки |
 | `move_stop_to_breakeven` | Перенос стопа в безубыток после TP1 |
 | `close_active_on_blackout` | Закрывать ли активные сделки при старте blackout |
+| `close_profitable_on_session_end` | На конце сессии закрывать только сделки с плавающей прибылью (убыточные можно переносить) |
 | `intrabar_stop_priority` | При касании и TP, и SL внутри одной свечи приоритет у SL |
 
 ### `telegram`
@@ -322,8 +364,9 @@ Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
 | `pullback_max_atr` | Макс. глубина pullback в ATR |
 | `pullback_location_mode` | Тип зоны pullback (`ANY`, и др.) |
 | `confirmation_body_min_atr` | Мин. размер тела confirm-свечи в ATR |
-| `mtf_alignment_enabled` | Включить фильтр направления старшего ТФ (агрегация из текущего ТФ) |
-| `mtf_factor` / `mtf_fast_ema` / `mtf_slow_ema` | Параметры MTF-фильтра: фактор агрегации и EMA |
+| `use_mtf_filter` | Включить MTF-фильтр (тренд + setup) |
+| `trend_timeframe` / `setup_timeframe` | Старшие ТФ для фильтра (например, `1hour` и `15min`) |
+| `mtf_fast_ema` / `mtf_slow_ema` / `mtf_slope_bars` | Параметры EMA и slope в MTF-фильтре |
 | `stop_buffer_atr` | Буфер SL в ATR |
 | `tp1_r` | TP1 в R |
 | `tp2_r` | TP2 в R |
@@ -350,6 +393,8 @@ Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
 | `tp2_r` | TP2 в R |
 | `max_retest_bars` | Лимит баров на ретест |
 | `retest_tolerance_atr` | Допуск ретеста в ATR |
+| `use_mtf_filter` + `trend_timeframe`/`setup_timeframe` | MTF-фильтр направления для breakout |
+| `mtf_fast_ema` / `mtf_slow_ema` / `mtf_slope_bars` | Параметры EMA/slope для MTF-фильтра |
 
 ### `strategy_params.liquidity_sweep_reversal`
 
@@ -370,6 +415,8 @@ Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
 | `tp1_r` | TP1 в R |
 | `tp2_r` | TP2 в R |
 | `entry_mode` | Режим входа (`NEXT_BAR_OPEN`, `CONFIRMATION_CLOSE` и т.д.) |
+| `use_mtf_filter` + `trend_timeframe`/`setup_timeframe` | MTF-фильтр направления для sweep-reversal |
+| `mtf_fast_ema` / `mtf_slow_ema` / `mtf_slope_bars` | Параметры EMA/slope для MTF-фильтра |
 
 ## Конфигурация `config/news_blackout.yaml`
 
