@@ -77,6 +77,8 @@ strategy_params:
       trend_pullback_vwap_ema:
         enabled: true
         blocked_entry_hours_local: []
+        blocked_entry_weekdays_local:
+          - 1
         tp1_r: 1
         tp2_r: 2.2
         confirmation_close_delta_atr: 0.02
@@ -133,6 +135,8 @@ strategy_params:
       trend_pullback_vwap_ema:
         enabled: true
         blocked_entry_hours_local: []
+        blocked_entry_weekdays_local:
+          - 4
         tp1_r: 1
         tp2_r: 2.2
         confirmation_close_delta_atr: 0.02
