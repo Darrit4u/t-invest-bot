@@ -14,6 +14,7 @@ from core.news_filter import NewsBlackoutFilter
 from core.regime_classifier import MarketRegimeClassifier
 from core.session_manager import SessionManager
 from core.signal_filter import SignalFilterPipeline
+from core.strategy_params import resolve_strategy_params
 from storage.memory_store import MemoryCandleStore
 from strategies.compression_breakout import CompressionBreakoutStrategy
 from strategies.liquidity_sweep import LiquiditySweepReversalStrategy
@@ -51,7 +52,9 @@ class SignalEngine:
         self._regime_classifier = MarketRegimeClassifier.from_params(params)
         self._signal_filter = SignalFilterPipeline(params=params)
         self._blackout_filter = blackout_filter
-        self._strategies = self._build_strategies(params)
+        self._strategy_params_section = _strategy_params_section(params)
+        self._strategy_classes = self._build_strategy_classes()
+        self._strategy_cache: dict[tuple[str, str], Any] = {}
         self._max_eval_candles = int(params.get("max_eval_candles", 350))
         signal_engine_cfg = params.get("signal_engine", {})
         if not isinstance(signal_engine_cfg, dict):
@@ -99,8 +102,14 @@ class SignalEngine:
         rejected_reasons: list[str] = []
 
         for strategy_name in instrument_meta.allowed_strategies:
-            strategy = self._strategies.get(strategy_name)
+            strategy = self._resolve_strategy(
+                instrument=instrument_meta.symbol,
+                strategy_name=strategy_name,
+            )
             if strategy is None:
+                continue
+            if not _strategy_is_enabled(strategy.params):
+                rejected_reasons.append(f"{strategy_name}:disabled")
                 continue
 
             raw = strategy.evaluate(context)
@@ -134,30 +143,46 @@ class SignalEngine:
             rejected_reasons=tuple(rejected_reasons),
         )
 
-    @staticmethod
-    def _build_strategies(params: dict[str, Any]) -> dict[str, Any]:
-        section = params.get("strategy_params", {})
-        if not isinstance(section, dict):
-            section = {}
+    def _resolve_strategy(self, *, instrument: str, strategy_name: str) -> Any | None:
+        cache_key = (instrument, strategy_name)
+        cached = self._strategy_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
+        strategy_cls = self._strategy_classes.get(strategy_name)
+        if strategy_cls is None:
+            return None
+
+        params = resolve_strategy_params(
+            section=self._strategy_params_section,
+            strategy_name=strategy_name,
+            instrument_symbol=instrument,
+        )
+        strategy = strategy_cls(params=params)
+        self._strategy_cache[cache_key] = strategy
+        return strategy
+
+    @staticmethod
+    def _build_strategy_classes() -> dict[str, Any]:
         return {
-            "trend_pullback_vwap_ema": TrendPullbackVWAPEMAStrategy(
-                params=_strategy_params(section, "trend_pullback_vwap_ema")
-            ),
-            "compression_breakout": CompressionBreakoutStrategy(
-                params=_strategy_params(section, "compression_breakout")
-            ),
-            "liquidity_sweep_reversal": LiquiditySweepReversalStrategy(
-                params=_strategy_params(section, "liquidity_sweep_reversal")
-            ),
+            "trend_pullback_vwap_ema": TrendPullbackVWAPEMAStrategy,
+            "compression_breakout": CompressionBreakoutStrategy,
+            "liquidity_sweep_reversal": LiquiditySweepReversalStrategy,
         }
 
 
-def _strategy_params(section: dict[str, Any], key: str) -> dict[str, Any]:
-    value = section.get(key, {})
-    if isinstance(value, dict):
-        return value
+def _strategy_params_section(params: dict[str, Any]) -> dict[str, Any]:
+    section = params.get("strategy_params", {})
+    if isinstance(section, dict):
+        return section
     return {}
+
+
+def _strategy_is_enabled(params: dict[str, Any]) -> bool:
+    value = params.get("enabled", True)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _build_indicator_config(params: dict[str, Any]) -> IndicatorConfig:

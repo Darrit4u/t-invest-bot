@@ -41,20 +41,22 @@ class IntegrationPipelineTests(unittest.TestCase):
             "balance_ema_distance_atr": 0.0,
             "balance_vwap_slope_abs_atr": 0.0,
         }
-        params.setdefault("strategy_params", {})["trend_pullback_vwap_ema"] = {
-            "impulse_bars": 3,
-            "impulse_atr_mult": 0.1,
-            "min_bullish_bars_in_impulse": 1,
-            "min_bearish_bars_in_impulse": 1,
-            "volume_impulse_mult": 0.1,
-            "min_vwap_extension_atr": 0.0,
-            "max_vwap_extension_atr": 10.0,
-            "pullback_min_atr": 0.01,
-            "pullback_max_atr": 10.0,
-            "pullback_location_mode": "ANY",
-            "stop_buffer_atr": 0.05,
-            "tp1_r": 1.0,
-            "tp2_r": 2.0,
+        params["strategy_params"] = {
+            "trend_pullback_vwap_ema": {
+                "impulse_bars": 3,
+                "impulse_atr_mult": 0.1,
+                "min_bullish_bars_in_impulse": 1,
+                "min_bearish_bars_in_impulse": 1,
+                "volume_impulse_mult": 0.1,
+                "min_vwap_extension_atr": 0.0,
+                "max_vwap_extension_atr": 10.0,
+                "pullback_min_atr": 0.01,
+                "pullback_max_atr": 10.0,
+                "pullback_location_mode": "ANY",
+                "stop_buffer_atr": 0.05,
+                "tp1_r": 1.0,
+                "tp2_r": 2.0,
+            }
         }
 
         engine = SignalEngine(

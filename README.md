@@ -349,6 +349,41 @@ Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
 | `send_startup_message` | Отправлять сообщение о старте |
 | `send_shutdown_summary` | Отправлять итоговую сводку при остановке |
 
+### `strategy_params` (глобально + по паре инструмент/стратегия)
+
+Поддерживаются две структуры:
+
+1) Legacy (обратная совместимость):
+
+```yaml
+strategy_params:
+  trend_pullback_vwap_ema:
+    tp1_r: 1.0
+    tp2_r: 2.2
+```
+
+2) Рекомендуемая (пер-пара `instrument + strategy`):
+
+```yaml
+strategy_params:
+  by_instrument:
+    SILVER:
+      trend_pullback_vwap_ema:
+        enabled: true
+        tp1_r: 1.2
+        tp2_r: 2.4
+```
+
+Дополнительно можно использовать `defaults` для общих значений и алиас `instruments` вместо `by_instrument`.
+Приоритет применения: `defaults` -> `by_instrument.<instrument>`.
+
+Минимальный набор, который держим в YAML:
+- `trend_pullback_vwap_ema`: `enabled`, `blocked_entry_hours_local`, `tp1_r`, `tp2_r`, `confirmation_close_delta_atr`, `use_mtf_filter`, `trend_timeframe`, `setup_timeframe`.
+- `compression_breakout`: `enabled`, `range_min_atr`, `range_max_atr`, `breakout_body_min_atr`, `breakout_volume_mult`, `tp1_r`, `tp2_r`.
+- `liquidity_sweep_reversal`: `enabled`, `balance_crosses_vwap_min`, `day_range_max_atr`, `sweep_min_atr` (или `sweep_min_ticks`), `return_close_distance_atr`, `tp1_r`, `tp2_r`, `use_mtf_filter`.
+
+Остальные «тонкие» параметры удалены из YAML и оставлены как дефолты в коде.
+
 ### `strategy_params.trend_pullback_vwap_ema`
 
 | Ключ | За что отвечает |

@@ -22,41 +22,15 @@ max_eval_candles: 350
 storage:
   db_path: "signals.db"
 
-indicator_engine:
-  ema_fast: 20
-  ema_slow: 50
-  atr_period: 14
-  volume_period: 20
-  slope_period: 5
-  crossing_lookback: 30
-  overlap_window: 12
-  swing_window: 5
-
-regime_classifier:
-  trend_ema_distance_atr: 0.12
-  trend_vwap_slope_atr: 0.014
-  trend_crossing_max: 6
-  compression_range_min_atr: 0.45
-  compression_range_max_atr: 2.80
-  compression_ema_distance_atr: 0.17
-  compression_vwap_slope_abs_atr: 0.07
-  compression_overlap_min: 0.50
-  balance_crossing_min: 3
-  balance_ema_distance_atr: 0.18
-  balance_vwap_slope_abs_atr: 0.07
-
 signal_filter:
   commission_roundtrip: 0.0008
   safety_multiplier: 1.2
 
 trade_simulator:
   commission_per_side: 0.0004
-  tp1_size: 0.5
   max_wait_bars: 14
   max_trade_bars: 240
   move_stop_to_breakeven: true
-  close_active_on_blackout: true
-  close_profitable_on_session_end: true
   intrabar_stop_priority: true
 
 telegram:
@@ -70,75 +44,115 @@ telegram:
   send_shutdown_summary: true
 
 strategy_params:
-  trend_pullback_vwap_ema:
-    impulse_bars: 3
-    impulse_atr_mult: 0.60
-    min_bullish_bars_in_impulse: 2
-    min_bearish_bars_in_impulse: 2
-    volume_impulse_mult: 0.80
-    min_vwap_extension_atr: 0.08
-    max_vwap_extension_atr: 2.80
-    pullback_min_atr: 0.07
-    pullback_max_atr: 1.10
-    pullback_location_mode: "ANY"
-    confirmation_body_min_atr: 0.04
-    use_mtf_filter: true
-    trend_timeframe: "1hour"
-    setup_timeframe: "15min"
-    mtf_fast_ema: 3
-    mtf_slow_ema: 6
-    mtf_slope_bars: 2
-    stop_buffer_atr: 0.15
-    tp1_r: 0.9
-    tp2_r: 1.8
-    entry_timing_mode: "NEXT_BAR_OPEN"
+  by_instrument:
+    ES:
+      trend_pullback_vwap_ema:
+        enabled: true
+        blocked_entry_hours_local: [14, 20, 21]
+        tp1_r: 0.75
+        tp2_r: 1.35
+        confirmation_close_delta_atr: 0.02
+        use_mtf_filter: true
+        trend_timeframe: "1hour"
+        setup_timeframe: "15min"
+      compression_breakout:
+        enabled: true
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
+        tp1_r: 1
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: true
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
+        use_mtf_filter: true
 
-  compression_breakout:
-    compression_window_bars: 12
-    range_max_atr: 2.8
-    range_min_atr: 0.45
-    ema_distance_max_atr: 0.16
-    vwap_slope_abs_max_atr: 0.07
-    overlap_ratio_min: 0.50
-    volume_floor_mult: 0.65
-    breakout_body_min_atr: 0.18
-    breakout_volume_mult: 1.00
-    late_breakout_extension_atr: 0.55
-    large_breakout_retest_threshold_atr: 0.85
-    stop_atr: 0.55
-    stop_range_factor: 0.40
-    tp1_r: 1.0
-    tp2_r: 2.1
-    max_retest_bars: 4
-    retest_tolerance_atr: 0.20
-    use_mtf_filter: true
-    trend_timeframe: "1hour"
-    setup_timeframe: "15min"
-    mtf_fast_ema: 3
-    mtf_slow_ema: 6
-    mtf_slope_bars: 2
+    SILVER:
+      trend_pullback_vwap_ema:
+        enabled: true
+        blocked_entry_hours_local: [14, 20, 21]
+        tp1_r: 0.75
+        tp2_r: 1.35
+        confirmation_close_delta_atr: 0.02
+        use_mtf_filter: true
+        trend_timeframe: "1hour"
+        setup_timeframe: "15min"
+      compression_breakout:
+        enabled: true
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
+        tp1_r: 1
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: true
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
+        use_mtf_filter: true
 
-  liquidity_sweep_reversal:
-    reference_lookback_bars: 18
-    balance_crosses_vwap_min: 4
-    ema_distance_max_atr: 0.13
-    vwap_slope_abs_max_atr: 0.055
-    day_range_max_atr: 4.2
-    impulse_block_atr: 2.1
-    sweep_min_atr: 0.08
-    sweep_max_atr: 0.85
-    wick_min_share: 0.32
-    sweep_volume_mult: 1.05
-    return_close_distance_atr: 0.22
-    stop_buffer_atr: 0.12
-    tp1_r: 0.9
-    tp2_r: 1.6
-    entry_mode: "NEXT_BAR_OPEN"
-    use_mtf_filter: true
-    trend_timeframe: "1hour"
-    setup_timeframe: "15min"
-    mtf_fast_ema: 3
-    mtf_slow_ema: 6
-    mtf_slope_bars: 2
+    BRENT:
+      trend_pullback_vwap_ema:
+        enabled: true
+        blocked_entry_hours_local: [14, 20, 21]
+        tp1_r: 0.75
+        tp2_r: 1.35
+        confirmation_close_delta_atr: 0.02
+        use_mtf_filter: true
+        trend_timeframe: "1hour"
+        setup_timeframe: "15min"
+      compression_breakout:
+        enabled: true
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
+        tp1_r: 1
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: true
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
+        use_mtf_filter: true
 
-
+    NG:
+      trend_pullback_vwap_ema:
+        enabled: true
+        blocked_entry_hours_local: [14, 20, 21]
+        tp1_r: 0.75
+        tp2_r: 1.35
+        confirmation_close_delta_atr: 0.02
+        use_mtf_filter: true
+        trend_timeframe: "1hour"
+        setup_timeframe: "15min"
+      compression_breakout:
+        enabled: true
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
+        tp1_r: 1
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: true
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
+        use_mtf_filter: true

@@ -121,6 +121,33 @@ class HistoryPreloaderTests(unittest.IsolatedAsyncioTestCase):
         # 5min -> 1hour ratio is 12; with slow=6,slope=2 => (6+2+1)*12 = 108 bars.
         self.assertGreaterEqual(bars, 108)
 
+    def test_estimate_required_bars_uses_instrument_overrides(self) -> None:
+        params = {
+            "strategy_params": {
+                "defaults": {
+                    "trend_pullback_vwap_ema": {
+                        "impulse_bars": 3,
+                        "use_mtf_filter": False,
+                    }
+                },
+                "by_instrument": {
+                    "NG": {
+                        "trend_pullback_vwap_ema": {
+                            "use_mtf_filter": True,
+                            "trend_timeframe": "1hour",
+                            "setup_timeframe": "15min",
+                            "mtf_slow_ema": 7,
+                            "mtf_slope_bars": 3,
+                        }
+                    }
+                },
+            }
+        }
+
+        bars = estimate_required_bars(params=params, timeframe="5min")
+        # 5min -> 1hour ratio is 12; with slow=7,slope=3 => (7+3+1)*12 = 132 bars.
+        self.assertGreaterEqual(bars, 132)
+
 
 if __name__ == "__main__":
     unittest.main()

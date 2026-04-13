@@ -8,6 +8,7 @@ from typing import Any
 
 from core.instrument_registry import InstrumentRegistry
 from core.market_data import Candle, CandleValidationError, _load_tinvest_sdk, _quotation_to_float
+from core.strategy_params import iter_strategy_param_variants
 from storage.memory_store import MemoryCandleStore
 
 
@@ -215,26 +216,32 @@ def estimate_required_bars(*, params: dict[str, Any], timeframe: str) -> int:
     if not isinstance(strat_cfg, dict):
         strat_cfg = {}
 
-    trend_cfg = strat_cfg.get("trend_pullback_vwap_ema", {})
-    if not isinstance(trend_cfg, dict):
-        trend_cfg = {}
-    comp_cfg = strat_cfg.get("compression_breakout", {})
-    if not isinstance(comp_cfg, dict):
-        comp_cfg = {}
-    sweep_cfg = strat_cfg.get("liquidity_sweep_reversal", {})
-    if not isinstance(sweep_cfg, dict):
-        sweep_cfg = {}
+    trend_variants = iter_strategy_param_variants(
+        section=strat_cfg,
+        strategy_name="trend_pullback_vwap_ema",
+    )
+    comp_variants = iter_strategy_param_variants(
+        section=strat_cfg,
+        strategy_name="compression_breakout",
+    )
+    sweep_variants = iter_strategy_param_variants(
+        section=strat_cfg,
+        strategy_name="liquidity_sweep_reversal",
+    )
 
-    trend_need = int(trend_cfg.get("impulse_bars", 3)) + 2
-    comp_need = int(comp_cfg.get("compression_window_bars", 12)) + int(comp_cfg.get("max_retest_bars", 2)) + 1
-    sweep_need = int(sweep_cfg.get("reference_lookback_bars", 20)) + 2
+    trend_need = max(int(row.get("impulse_bars", 3)) + 2 for row in trend_variants)
+    comp_need = max(
+        int(row.get("compression_window_bars", 12)) + int(row.get("max_retest_bars", 2)) + 1
+        for row in comp_variants
+    )
+    sweep_need = max(int(row.get("reference_lookback_bars", 20)) + 2 for row in sweep_variants)
 
     bars = max(indicator_need, trend_need, comp_need, sweep_need)
     bars = max(
         bars,
-        _estimate_mtf_source_bars(strategy_cfg=trend_cfg, timeframe=timeframe),
-        _estimate_mtf_source_bars(strategy_cfg=comp_cfg, timeframe=timeframe),
-        _estimate_mtf_source_bars(strategy_cfg=sweep_cfg, timeframe=timeframe),
+        _max_mtf_source_bars(variants=trend_variants, timeframe=timeframe),
+        _max_mtf_source_bars(variants=comp_variants, timeframe=timeframe),
+        _max_mtf_source_bars(variants=sweep_variants, timeframe=timeframe),
     )
     return bars
 
@@ -255,6 +262,13 @@ def _estimate_mtf_source_bars(*, strategy_cfg: dict[str, Any], timeframe: str) -
     setup_mult = _ratio(source=source, target_tf=setup_tf)
     max_mult = max(trend_mult, setup_mult, 1)
     return required_agg * max_mult
+
+
+def _max_mtf_source_bars(*, variants: tuple[dict[str, Any], ...], timeframe: str) -> int:
+    return max(
+        (_estimate_mtf_source_bars(strategy_cfg=row, timeframe=timeframe) for row in variants),
+        default=0,
+    )
 
 
 def _ratio(*, source: int, target_tf: str) -> int:
