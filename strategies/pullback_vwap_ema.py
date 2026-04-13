@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from statistics import mean
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from core.models import MarketRegime, SignalDirection, StrategyContext, StrategySignal
 from strategies.base import BaseStrategy
@@ -64,6 +65,16 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         impulse = candles[-(impulse_bars + 2) : -2]
         pullback = candles[-2]
         confirm = candles[-1]
+        impulse_vwap, pullback_vwap = _select_impulse_and_pullback_vwap(
+            candles=candles,
+            impulse_bars=impulse_bars,
+            timezone_name=_strategy_timezone(context),
+        )
+        ema_fast_series = _ema_series(
+            [item.close for item in candles],
+            period=_indicator_ema_fast_period(context),
+        )
+        pullback_ema_fast = ema_fast_series[-2]
 
         if direction == SignalDirection.LONG:
             return self._evaluate_long(
@@ -71,6 +82,9 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
                 impulse=impulse,
                 pullback=pullback,
                 confirm=confirm,
+                impulse_vwap=impulse_vwap,
+                pullback_vwap=pullback_vwap,
+                pullback_ema_fast=pullback_ema_fast,
                 mtf_meta=mtf_meta,
             )
         return self._evaluate_short(
@@ -78,6 +92,9 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             impulse=impulse,
             pullback=pullback,
             confirm=confirm,
+            impulse_vwap=impulse_vwap,
+            pullback_vwap=pullback_vwap,
+            pullback_ema_fast=pullback_ema_fast,
             mtf_meta=mtf_meta,
         )
 
@@ -87,6 +104,9 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         impulse: list,
         pullback,
         confirm,
+        impulse_vwap: list[float],
+        pullback_vwap: float,
+        pullback_ema_fast: float,
         mtf_meta: dict[str, Any],
     ) -> StrategySignal | None:
         atr = context.indicators.atr
@@ -119,8 +139,8 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             return None
 
         zone_mode = self._str("pullback_location_mode", "ANY")
-        touched_vwap = pullback.low <= context.indicators.vwap <= pullback.high
-        touched_ema = pullback.low <= context.indicators.ema_fast <= pullback.high
+        touched_vwap = pullback.low <= pullback_vwap <= pullback.high
+        touched_ema = pullback.low <= pullback_ema_fast <= pullback.high
         if zone_mode == "VWAP_ONLY" and not touched_vwap:
             return None
         if zone_mode == "EMA_FAST_ONLY" and not touched_ema:
@@ -135,6 +155,12 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         if confirm.close <= confirm.open:
             return None
         if confirm.close <= pullback.close:
+            return None
+        confirmation_delta = self._float("confirmation_close_delta_atr", 0.02) * atr
+        if (confirm.close - pullback.close) < confirmation_delta:
+            return None
+        confirmation_break_mode = self._str("confirmation_break_mode", "BODY").strip().upper()
+        if confirmation_break_mode == "EXTREME" and confirm.close <= pullback.high:
             return None
 
         stop = pullback.low - self._float("stop_buffer_atr", 0.15) * atr
@@ -157,6 +183,8 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
                 "impulse_size_atr": move / atr,
                 "pullback_depth_atr": pullback_depth / atr,
                 "volume_ratio": volume_ratio,
+                "pullback_vwap": pullback_vwap,
+                "pullback_ema_fast": pullback_ema_fast,
                 "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
                 **mtf_meta,
@@ -169,6 +197,9 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         impulse: list,
         pullback,
         confirm,
+        impulse_vwap: list[float],
+        pullback_vwap: float,
+        pullback_ema_fast: float,
         mtf_meta: dict[str, Any],
     ) -> StrategySignal | None:
         atr = context.indicators.atr
@@ -201,8 +232,8 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             return None
 
         zone_mode = self._str("pullback_location_mode", "ANY")
-        touched_vwap = pullback.low <= context.indicators.vwap <= pullback.high
-        touched_ema = pullback.low <= context.indicators.ema_fast <= pullback.high
+        touched_vwap = pullback.low <= pullback_vwap <= pullback.high
+        touched_ema = pullback.low <= pullback_ema_fast <= pullback.high
         if zone_mode == "VWAP_ONLY" and not touched_vwap:
             return None
         if zone_mode == "EMA_FAST_ONLY" and not touched_ema:
@@ -217,6 +248,12 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         if confirm.close >= confirm.open:
             return None
         if confirm.close >= pullback.close:
+            return None
+        confirmation_delta = self._float("confirmation_close_delta_atr", 0.02) * atr
+        if (pullback.close - confirm.close) < confirmation_delta:
+            return None
+        confirmation_break_mode = self._str("confirmation_break_mode", "BODY").strip().upper()
+        if confirmation_break_mode == "EXTREME" and confirm.close >= pullback.low:
             return None
 
         stop = pullback.high + self._float("stop_buffer_atr", 0.15) * atr
@@ -239,6 +276,8 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
                 "impulse_size_atr": move / atr,
                 "pullback_depth_atr": pullback_depth / atr,
                 "volume_ratio": volume_ratio,
+                "pullback_vwap": pullback_vwap,
+                "pullback_ema_fast": pullback_ema_fast,
                 "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
                 **mtf_meta,
@@ -254,3 +293,65 @@ def _touched_zone_label(*, touched_vwap: bool, touched_ema: bool) -> str:
     if touched_ema:
         return "EMA_FAST"
     return "NONE"
+
+
+def _indicator_ema_fast_period(context: StrategyContext) -> int:
+    indicator_cfg = context.params.get("indicator_engine", {})
+    if not isinstance(indicator_cfg, dict):
+        return 20
+    return max(2, int(indicator_cfg.get("ema_fast", 20)))
+
+
+def _strategy_timezone(context: StrategyContext) -> str:
+    if context.instrument.sessions:
+        return context.instrument.sessions[0].timezone
+    return "UTC"
+
+
+def _session_vwap_series(candles: list, *, timezone_name: str) -> list[float]:
+    zone = ZoneInfo(timezone_name)
+    result: list[float] = []
+
+    current_session = None
+    cumulative_tpv = 0.0
+    cumulative_vol = 0.0
+
+    for candle in candles:
+        session_key = candle.datetime.astimezone(zone).date()
+        if session_key != current_session:
+            current_session = session_key
+            cumulative_tpv = 0.0
+            cumulative_vol = 0.0
+
+        typical = (candle.high + candle.low + candle.close) / 3.0
+        cumulative_tpv += typical * candle.volume
+        cumulative_vol += candle.volume
+        if cumulative_vol <= 0:
+            result.append(candle.close)
+        else:
+            result.append(cumulative_tpv / cumulative_vol)
+
+    return result
+
+
+def _select_impulse_and_pullback_vwap(
+    *,
+    candles: list,
+    impulse_bars: int,
+    timezone_name: str,
+) -> tuple[list[float], float]:
+    vwap_series = _session_vwap_series(candles, timezone_name=timezone_name)
+    impulse = vwap_series[-(impulse_bars + 2) : -2]
+    pullback_vwap = vwap_series[-2]
+    return impulse, pullback_vwap
+
+
+def _ema_series(values: list[float], *, period: int) -> list[float]:
+    alpha = 2.0 / (max(period, 2) + 1.0)
+    result: list[float] = []
+    ema_value = values[0]
+    result.append(ema_value)
+    for value in values[1:]:
+        ema_value = (alpha * value) + ((1.0 - alpha) * ema_value)
+        result.append(ema_value)
+    return result

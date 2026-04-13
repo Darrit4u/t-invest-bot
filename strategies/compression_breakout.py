@@ -70,8 +70,14 @@ class CompressionBreakoutStrategy(BaseStrategy):
         if body < self._float("breakout_body_min_atr", 0.35) * atr:
             return None
 
-        volume_ratio = breakout.volume / max(context.indicators.rolling_volume_avg, 1e-9)
-        if volume_ratio < self._float("breakout_volume_mult", 1.25):
+        volume_baseline = max(
+            context.indicators.rolling_volume_avg,
+            mean(item.volume for item in window),
+            1e-9,
+        )
+        volume_ratio = breakout.volume / volume_baseline
+        strong_body = body >= self._float("breakout_body_strong_atr", 0.55) * atr
+        if volume_ratio < self._float("breakout_volume_mult", 1.25) and not strong_body:
             return None
 
         max_extension = self._float("late_breakout_extension_atr", 0.30) * atr
@@ -128,6 +134,7 @@ class CompressionBreakoutStrategy(BaseStrategy):
         breakout_volume_min = self._float("breakout_volume_mult", 1.25)
         tolerance = self._float("retest_tolerance_atr", 0.10) * atr
         confirm_volume_ratio = confirm.volume / max(context.indicators.rolling_volume_avg, 1e-9)
+        requires_large_breakout = self._bool("retest_requires_large_breakout", False)
 
         candles = context.candles
         for bars_since_breakout in range(1, max_retest_bars + 1):
@@ -146,11 +153,14 @@ class CompressionBreakoutStrategy(BaseStrategy):
                 continue
 
             body = abs(breakout.close - breakout.open)
-            if body <= large_threshold:
+            strong_breakout = body > large_threshold
+            if requires_large_breakout and not strong_breakout:
+                continue
+            if not requires_large_breakout and body < self._float("retest_breakout_body_min_atr", 0.18) * atr:
                 continue
 
             breakout_volume_ratio = breakout.volume / max(context.indicators.rolling_volume_avg, 1e-9)
-            if breakout_volume_ratio < breakout_volume_min:
+            if breakout_volume_ratio < breakout_volume_min and not strong_breakout:
                 continue
 
             if breakout.close > range_high:
@@ -160,7 +170,10 @@ class CompressionBreakoutStrategy(BaseStrategy):
                     continue
                 if confirm.close <= confirm.open:
                     continue
-                if confirm_volume_ratio < breakout_volume_min * 0.8:
+                if confirm_volume_ratio < breakout_volume_min * self._float(
+                    "retest_confirm_volume_factor",
+                    0.7,
+                ) and not strong_breakout:
                     continue
                 return self._build_signal(
                     context=context,
@@ -184,7 +197,10 @@ class CompressionBreakoutStrategy(BaseStrategy):
                     continue
                 if confirm.close >= confirm.open:
                     continue
-                if confirm_volume_ratio < breakout_volume_min * 0.8:
+                if confirm_volume_ratio < breakout_volume_min * self._float(
+                    "retest_confirm_volume_factor",
+                    0.7,
+                ) and not strong_breakout:
                     continue
                 return self._build_signal(
                     context=context,
@@ -213,11 +229,22 @@ class CompressionBreakoutStrategy(BaseStrategy):
         if range_width > self._float("range_max_atr", 2.0) * atr:
             return False
 
-        if context.indicators.ema_distance > self._float("ema_distance_max_atr", 0.12) * atr:
-            return False
+        ema_distance = context.indicators.ema_distance
+        ema_limit = self._float("ema_distance_max_atr", 0.12) * atr
+        if ema_distance > ema_limit:
+            overlap_relax_min = self._float("ema_relax_overlap_min", 0.72)
+            hard_cap = self._float("ema_distance_hard_cap_atr", 0.26) * atr
+            if context.indicators.overlap_ratio < overlap_relax_min or ema_distance > hard_cap:
+                return False
 
-        if abs(context.indicators.vwap_slope) > self._float("vwap_slope_abs_max_atr", 0.04) * atr:
-            return False
+        vwap_slope_abs = abs(context.indicators.vwap_slope)
+        vwap_limit = self._float("vwap_slope_abs_max_atr", 0.04) * atr
+        if vwap_slope_abs > vwap_limit:
+            if (
+                context.indicators.overlap_ratio < self._float("vwap_relax_overlap_min", 0.75)
+                or vwap_slope_abs > self._float("vwap_slope_hard_cap_atr", 0.12) * atr
+            ):
+                return False
 
         if context.indicators.overlap_ratio < self._float("overlap_ratio_min", 0.60):
             return False
