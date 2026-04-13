@@ -31,6 +31,9 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         if atr <= 0:
             return None
 
+        if _entry_hour_blocked(context=context, params=self.params):
+            return None
+
         long_bias = (
             context.indicators.close > context.indicators.vwap
             and context.indicators.ema_fast > context.indicators.ema_slow
@@ -141,12 +144,20 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         zone_mode = self._str("pullback_location_mode", "ANY")
         touched_vwap = pullback.low <= pullback_vwap <= pullback.high
         touched_ema = pullback.low <= pullback_ema_fast <= pullback.high
+        anchor_distance = min(
+            _distance_to_range(level=pullback_vwap, low=pullback.low, high=pullback.high),
+            _distance_to_range(level=pullback_ema_fast, low=pullback.low, high=pullback.high),
+        )
         if zone_mode == "VWAP_ONLY" and not touched_vwap:
             return None
         if zone_mode == "EMA_FAST_ONLY" and not touched_ema:
             return None
         if zone_mode in {"VWAP_OR_EMA_FAST", "VWAP_EMA_ZONE"} and not (touched_vwap or touched_ema):
             return None
+        if zone_mode == "ANY" and self._bool("enforce_anchor_proximity_any", False):
+            max_anchor_distance = self._float("pullback_anchor_max_distance_atr", 0.35) * atr
+            if anchor_distance > max_anchor_distance:
+                return None
 
         confirm_body = abs(confirm.close - confirm.open)
         if confirm_body < self._float("confirmation_body_min_atr", 0.05) * atr:
@@ -161,6 +172,10 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             return None
         confirmation_break_mode = self._str("confirmation_break_mode", "BODY").strip().upper()
         if confirmation_break_mode == "EXTREME" and confirm.close <= pullback.high:
+            return None
+        if self._bool("confirmation_reclaim_ema_fast", False) and confirm.close <= pullback_ema_fast:
+            return None
+        if self._bool("confirmation_reclaim_vwap", False) and confirm.close <= pullback_vwap:
             return None
 
         stop = pullback.low - self._float("stop_buffer_atr", 0.15) * atr
@@ -185,6 +200,7 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
                 "volume_ratio": volume_ratio,
                 "pullback_vwap": pullback_vwap,
                 "pullback_ema_fast": pullback_ema_fast,
+                "anchor_distance_atr": anchor_distance / atr,
                 "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
                 **mtf_meta,
@@ -234,12 +250,20 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         zone_mode = self._str("pullback_location_mode", "ANY")
         touched_vwap = pullback.low <= pullback_vwap <= pullback.high
         touched_ema = pullback.low <= pullback_ema_fast <= pullback.high
+        anchor_distance = min(
+            _distance_to_range(level=pullback_vwap, low=pullback.low, high=pullback.high),
+            _distance_to_range(level=pullback_ema_fast, low=pullback.low, high=pullback.high),
+        )
         if zone_mode == "VWAP_ONLY" and not touched_vwap:
             return None
         if zone_mode == "EMA_FAST_ONLY" and not touched_ema:
             return None
         if zone_mode in {"VWAP_OR_EMA_FAST", "VWAP_EMA_ZONE"} and not (touched_vwap or touched_ema):
             return None
+        if zone_mode == "ANY" and self._bool("enforce_anchor_proximity_any", False):
+            max_anchor_distance = self._float("pullback_anchor_max_distance_atr", 0.35) * atr
+            if anchor_distance > max_anchor_distance:
+                return None
 
         confirm_body = abs(confirm.close - confirm.open)
         if confirm_body < self._float("confirmation_body_min_atr", 0.05) * atr:
@@ -254,6 +278,10 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             return None
         confirmation_break_mode = self._str("confirmation_break_mode", "BODY").strip().upper()
         if confirmation_break_mode == "EXTREME" and confirm.close >= pullback.low:
+            return None
+        if self._bool("confirmation_reclaim_ema_fast", False) and confirm.close >= pullback_ema_fast:
+            return None
+        if self._bool("confirmation_reclaim_vwap", False) and confirm.close >= pullback_vwap:
             return None
 
         stop = pullback.high + self._float("stop_buffer_atr", 0.15) * atr
@@ -278,6 +306,7 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
                 "volume_ratio": volume_ratio,
                 "pullback_vwap": pullback_vwap,
                 "pullback_ema_fast": pullback_ema_fast,
+                "anchor_distance_atr": anchor_distance / atr,
                 "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
                 **mtf_meta,
@@ -355,3 +384,42 @@ def _ema_series(values: list[float], *, period: int) -> list[float]:
         ema_value = (alpha * value) + ((1.0 - alpha) * ema_value)
         result.append(ema_value)
     return result
+
+
+def _distance_to_range(*, level: float, low: float, high: float) -> float:
+    if low <= level <= high:
+        return 0.0
+    if level < low:
+        return low - level
+    return level - high
+
+
+def _entry_hour_blocked(*, context: StrategyContext, params: dict[str, Any]) -> bool:
+    raw = params.get("blocked_entry_hours_local", [])
+    blocked = _parse_hours(raw)
+    if not blocked:
+        return False
+
+    zone_name = _strategy_timezone(context)
+    zone = ZoneInfo(zone_name)
+    hour = context.candles[-1].datetime.astimezone(zone).hour
+    return hour in blocked
+
+
+def _parse_hours(raw: Any) -> set[int]:
+    if isinstance(raw, str):
+        parts = [item.strip() for item in raw.split(",") if item.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        parts = list(raw)
+    else:
+        return set()
+
+    out: set[int] = set()
+    for item in parts:
+        try:
+            hour = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour <= 23:
+            out.add(hour)
+    return out

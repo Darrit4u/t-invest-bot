@@ -81,7 +81,12 @@ strategy_params:
     pullback_min_atr: 0.07
     pullback_max_atr: 1.10
     pullback_location_mode: "ANY"
+    enforce_anchor_proximity_any: false
+    pullback_anchor_max_distance_atr: 0.35
     confirmation_body_min_atr: 0.04
+    confirmation_close_delta_atr: 0.02
+    confirmation_reclaim_ema_fast: false
+    blocked_entry_hours_local: [14, 20, 21]
     use_mtf_filter: true
     trend_timeframe: "1hour"
     setup_timeframe: "15min"
@@ -89,8 +94,8 @@ strategy_params:
     mtf_slow_ema: 6
     mtf_slope_bars: 2
     stop_buffer_atr: 0.15
-    tp1_r: 0.9
-    tp2_r: 1.8
+    tp1_r: 0.75
+    tp2_r: 1.35
     entry_timing_mode: "NEXT_BAR_OPEN"
 
   compression_breakout:
