@@ -31,7 +31,7 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
         if atr <= 0:
             return None
 
-        if _entry_hour_blocked(context=context, params=self.params):
+        if _entry_time_blocked(context=context, params=self.params):
             return None
 
         long_bias = (
@@ -394,16 +394,35 @@ def _distance_to_range(*, level: float, low: float, high: float) -> float:
     return level - high
 
 
-def _entry_hour_blocked(*, context: StrategyContext, params: dict[str, Any]) -> bool:
+def _entry_time_blocked(*, context: StrategyContext, params: dict[str, Any]) -> bool:
+    weekday = _entry_weekday_local(context=context)
+    blocked_weekdays = _parse_weekdays(params.get("blocked_entry_weekdays_local", []))
+    if blocked_weekdays and weekday in blocked_weekdays:
+        return True
+
+    allowed_weekdays = _parse_weekdays(params.get("allowed_entry_weekdays_local", []))
+    if allowed_weekdays and weekday not in allowed_weekdays:
+        return True
+
     raw = params.get("blocked_entry_hours_local", [])
     blocked = _parse_hours(raw)
     if not blocked:
         return False
 
+    hour = _entry_hour_local(context=context)
+    return hour in blocked
+
+
+def _entry_hour_local(*, context: StrategyContext) -> int:
     zone_name = _strategy_timezone(context)
     zone = ZoneInfo(zone_name)
-    hour = context.candles[-1].datetime.astimezone(zone).hour
-    return hour in blocked
+    return context.candles[-1].datetime.astimezone(zone).hour
+
+
+def _entry_weekday_local(*, context: StrategyContext) -> int:
+    zone_name = _strategy_timezone(context)
+    zone = ZoneInfo(zone_name)
+    return context.candles[-1].datetime.astimezone(zone).weekday()
 
 
 def _parse_hours(raw: Any) -> set[int]:
@@ -422,4 +441,23 @@ def _parse_hours(raw: Any) -> set[int]:
             continue
         if 0 <= hour <= 23:
             out.add(hour)
+    return out
+
+
+def _parse_weekdays(raw: Any) -> set[int]:
+    if isinstance(raw, str):
+        parts = [item.strip() for item in raw.split(",") if item.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        parts = list(raw)
+    else:
+        return set()
+
+    out: set[int] = set()
+    for item in parts:
+        try:
+            weekday = int(item)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= weekday <= 6:
+            out.add(weekday)
     return out

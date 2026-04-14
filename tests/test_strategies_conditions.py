@@ -25,6 +25,50 @@ class StrategyConditionTests(unittest.TestCase):
         ctx = build_context(candles=candles, regime=MarketRegime.TREND, indicators=indicators)
         self.assertIsNotNone(strategy.evaluate(ctx))
 
+    def test_trend_pullback_respects_blocked_entry_weekdays_local(self) -> None:
+        strategy = TrendPullbackVWAPEMAStrategy(
+            params={
+                "impulse_atr_mult": 0.1,
+                "volume_impulse_mult": 0.1,
+                "pullback_location_mode": "ANY",
+                "blocked_entry_weekdays_local": [0],
+            }
+        )
+        candles = build_trend_sequence()
+        indicators = build_indicator(
+            timestamp=candles[-1].datetime,
+            close=candles[-1].close,
+            vwap=candles[-1].close - 1,
+            ema_fast=candles[-1].close + 0.2,
+            ema_slow=candles[-1].close - 0.2,
+            atr=1.0,
+            rolling_volume_avg=1000,
+        )
+        ctx = build_context(candles=candles, regime=MarketRegime.TREND, indicators=indicators)
+        self.assertIsNone(strategy.evaluate(ctx))
+
+    def test_trend_pullback_respects_allowed_entry_weekdays_local(self) -> None:
+        strategy = TrendPullbackVWAPEMAStrategy(
+            params={
+                "impulse_atr_mult": 0.1,
+                "volume_impulse_mult": 0.1,
+                "pullback_location_mode": "ANY",
+                "allowed_entry_weekdays_local": [1],
+            }
+        )
+        candles = build_trend_sequence()
+        indicators = build_indicator(
+            timestamp=candles[-1].datetime,
+            close=candles[-1].close,
+            vwap=candles[-1].close - 1,
+            ema_fast=candles[-1].close + 0.2,
+            ema_slow=candles[-1].close - 0.2,
+            atr=1.0,
+            rolling_volume_avg=1000,
+        )
+        ctx = build_context(candles=candles, regime=MarketRegime.TREND, indicators=indicators)
+        self.assertIsNone(strategy.evaluate(ctx))
+
     def test_compression_breakout_generates_signal(self) -> None:
         strategy = CompressionBreakoutStrategy(
             params={

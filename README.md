@@ -241,11 +241,13 @@ python scripts/backtest_tinvest.py `
 - `config/profiles/params.conservative.yaml`
 - `config/profiles/params.balanced.yaml`
 - `config/profiles/params.active.yaml`
+- `config/profiles/params.shadow.yaml` (R&D: `ES+trend`, `BRENT+compression`)
 
 Дубликаты для шаблонов/репозитория:
 - `config/example/profiles/params.conservative.yaml`
 - `config/example/profiles/params.balanced.yaml`
 - `config/example/profiles/params.active.yaml`
+- `config/example/profiles/params.shadow.yaml`
 
 Быстро переключить активный профиль локально:
 
@@ -253,7 +255,7 @@ python scripts/backtest_tinvest.py `
 Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
 ```
 
-Замените `balanced` на `conservative` или `active`.
+Замените `balanced` на `conservative`, `active` или `shadow`.
 
 ### Общие настройки
 

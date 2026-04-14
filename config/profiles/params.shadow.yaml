@@ -47,7 +47,7 @@ strategy_params:
   by_instrument:
     ES:
       trend_pullback_vwap_ema:
-        enabled: false
+        enabled: true
         blocked_entry_hours_local: [14, 20, 21]
         tp1_r: 0.75
         tp2_r: 1.35
@@ -75,7 +75,7 @@ strategy_params:
 
     SILVER:
       trend_pullback_vwap_ema:
-        enabled: true
+        enabled: false
         blocked_entry_hours_local: [15, 17, 20]
         tp1_r: 0.9
         tp2_r: 1.8
@@ -112,7 +112,7 @@ strategy_params:
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: false
+        enabled: true
         range_min_atr: 0.45
         range_max_atr: 2.8
         breakout_body_min_atr: 0.18

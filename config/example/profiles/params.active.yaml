@@ -24,12 +24,12 @@ storage:
 
 signal_filter:
   commission_roundtrip: 0.0008
-  safety_multiplier: 1.2
+  safety_multiplier: 1.5
 
 trade_simulator:
   commission_per_side: 0.0004
-  max_wait_bars: 14
-  max_trade_bars: 240
+  max_wait_bars: 12
+  max_trade_bars: 180
   move_stop_to_breakeven: true
   intrabar_stop_priority: true
 
@@ -47,7 +47,7 @@ strategy_params:
   by_instrument:
     ES:
       trend_pullback_vwap_ema:
-        enabled: true
+        enabled: false
         blocked_entry_hours_local: [14, 20, 21]
         tp1_r: 0.75
         tp2_r: 1.35
@@ -56,7 +56,7 @@ strategy_params:
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
+        enabled: false
         range_min_atr: 0.45
         range_max_atr: 2.8
         breakout_body_min_atr: 0.18
@@ -64,7 +64,7 @@ strategy_params:
         tp1_r: 1
         tp2_r: 2.1
       liquidity_sweep_reversal:
-        enabled: true
+        enabled: false
         balance_crosses_vwap_min: 4
         day_range_max_atr: 4.2
         sweep_min_atr: 0.08
@@ -76,15 +76,15 @@ strategy_params:
     SILVER:
       trend_pullback_vwap_ema:
         enabled: true
-        blocked_entry_hours_local: [14, 20, 21]
-        tp1_r: 0.75
-        tp2_r: 1.35
-        confirmation_close_delta_atr: 0.02
-        use_mtf_filter: true
+        blocked_entry_hours_local: [15, 17, 20]
+        tp1_r: 0.9
+        tp2_r: 1.8
+        confirmation_close_delta_atr: 0.0
+        use_mtf_filter: false
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
+        enabled: false
         range_min_atr: 0.45
         range_max_atr: 2.8
         breakout_body_min_atr: 0.18
@@ -92,7 +92,7 @@ strategy_params:
         tp1_r: 1
         tp2_r: 2.1
       liquidity_sweep_reversal:
-        enabled: true
+        enabled: false
         balance_crosses_vwap_min: 4
         day_range_max_atr: 4.2
         sweep_min_atr: 0.08
@@ -103,7 +103,7 @@ strategy_params:
 
     BRENT:
       trend_pullback_vwap_ema:
-        enabled: true
+        enabled: false
         blocked_entry_hours_local: [14, 20, 21]
         tp1_r: 0.75
         tp2_r: 1.35
@@ -112,7 +112,7 @@ strategy_params:
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
+        enabled: false
         range_min_atr: 0.45
         range_max_atr: 2.8
         breakout_body_min_atr: 0.18
@@ -120,7 +120,7 @@ strategy_params:
         tp1_r: 1
         tp2_r: 2.1
       liquidity_sweep_reversal:
-        enabled: true
+        enabled: false
         balance_crosses_vwap_min: 4
         day_range_max_atr: 4.2
         sweep_min_atr: 0.08
@@ -131,7 +131,7 @@ strategy_params:
 
     NG:
       trend_pullback_vwap_ema:
-        enabled: true
+        enabled: false
         blocked_entry_hours_local: [14, 20, 21]
         tp1_r: 0.75
         tp2_r: 1.35
@@ -140,7 +140,7 @@ strategy_params:
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
+        enabled: false
         range_min_atr: 0.45
         range_max_atr: 2.8
         breakout_body_min_atr: 0.18
@@ -148,7 +148,7 @@ strategy_params:
         tp1_r: 1
         tp2_r: 2.1
       liquidity_sweep_reversal:
-        enabled: true
+        enabled: false
         balance_crosses_vwap_min: 4
         day_range_max_atr: 4.2
         sweep_min_atr: 0.08

@@ -47,116 +47,112 @@ strategy_params:
   by_instrument:
     ES:
       trend_pullback_vwap_ema:
-        enabled: true
-        blocked_entry_hours_local: []
-        tp1_r: 1
-        tp2_r: 2.2
+        enabled: false
+        blocked_entry_hours_local: [14, 20, 21]
+        tp1_r: 0.75
+        tp2_r: 1.35
         confirmation_close_delta_atr: 0.02
         use_mtf_filter: true
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
-        range_min_atr: 0.55
-        range_max_atr: 2.4
-        breakout_body_min_atr: 0.22
-        breakout_volume_mult: 1.15
-        tp1_r: 1.1
-        tp2_r: 2.4
-      liquidity_sweep_reversal:
-        enabled: true
-        balance_crosses_vwap_min: 5
-        day_range_max_atr: 3.5
-        sweep_min_atr: 0.1
-        return_close_distance_atr: 0.18
+        enabled: false
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
         tp1_r: 1
-        tp2_r: 1.8
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: false
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
         use_mtf_filter: true
 
     SILVER:
       trend_pullback_vwap_ema:
         enabled: true
-        blocked_entry_hours_local: []
-        blocked_entry_weekdays_local:
-          - 1
-        tp1_r: 1
-        tp2_r: 2.2
-        confirmation_close_delta_atr: 0.02
-        use_mtf_filter: true
+        blocked_entry_hours_local: [15, 17, 20]
+        tp1_r: 0.9
+        tp2_r: 1.8
+        confirmation_close_delta_atr: 0.0
+        use_mtf_filter: false
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
-        range_min_atr: 0.55
-        range_max_atr: 2.4
-        breakout_body_min_atr: 0.22
-        breakout_volume_mult: 1.15
-        tp1_r: 1.1
-        tp2_r: 2.4
-      liquidity_sweep_reversal:
-        enabled: true
-        balance_crosses_vwap_min: 5
-        day_range_max_atr: 3.5
-        sweep_min_atr: 0.1
-        return_close_distance_atr: 0.18
+        enabled: false
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
         tp1_r: 1
-        tp2_r: 1.8
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: false
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
         use_mtf_filter: true
 
     BRENT:
       trend_pullback_vwap_ema:
-        enabled: true
-        blocked_entry_hours_local: []
-        tp1_r: 1
-        tp2_r: 2.2
+        enabled: false
+        blocked_entry_hours_local: [14, 20, 21]
+        tp1_r: 0.75
+        tp2_r: 1.35
         confirmation_close_delta_atr: 0.02
         use_mtf_filter: true
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
-        range_min_atr: 0.55
-        range_max_atr: 2.4
-        breakout_body_min_atr: 0.22
-        breakout_volume_mult: 1.15
-        tp1_r: 1.1
-        tp2_r: 2.4
-      liquidity_sweep_reversal:
-        enabled: true
-        balance_crosses_vwap_min: 5
-        day_range_max_atr: 3.5
-        sweep_min_atr: 0.1
-        return_close_distance_atr: 0.18
+        enabled: false
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
         tp1_r: 1
-        tp2_r: 1.8
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: false
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
         use_mtf_filter: true
 
     NG:
       trend_pullback_vwap_ema:
-        enabled: true
-        blocked_entry_hours_local: []
-        blocked_entry_weekdays_local:
-          - 4
-        tp1_r: 1
-        tp2_r: 2.2
+        enabled: false
+        blocked_entry_hours_local: [14, 20, 21]
+        tp1_r: 0.75
+        tp2_r: 1.35
         confirmation_close_delta_atr: 0.02
         use_mtf_filter: true
         trend_timeframe: "1hour"
         setup_timeframe: "15min"
       compression_breakout:
-        enabled: true
-        range_min_atr: 0.55
-        range_max_atr: 2.4
-        breakout_body_min_atr: 0.22
-        breakout_volume_mult: 1.15
-        tp1_r: 1.1
-        tp2_r: 2.4
-      liquidity_sweep_reversal:
-        enabled: true
-        balance_crosses_vwap_min: 5
-        day_range_max_atr: 3.5
-        sweep_min_atr: 0.1
-        return_close_distance_atr: 0.18
+        enabled: false
+        range_min_atr: 0.45
+        range_max_atr: 2.8
+        breakout_body_min_atr: 0.18
+        breakout_volume_mult: 1
         tp1_r: 1
-        tp2_r: 1.8
+        tp2_r: 2.1
+      liquidity_sweep_reversal:
+        enabled: false
+        balance_crosses_vwap_min: 4
+        day_range_max_atr: 4.2
+        sweep_min_atr: 0.08
+        return_close_distance_atr: 0.22
+        tp1_r: 0.9
+        tp2_r: 1.6
         use_mtf_filter: true
