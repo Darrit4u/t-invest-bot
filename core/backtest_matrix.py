@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -350,10 +352,30 @@ def run_combo_backtest(
             if event.event_type in _CLOSE_EVENTS and trade is not None:
                 stats_engine.record_trade_closed(trade)
 
+    timezone_name = str(app_config.params.get("timezone", "Europe/Moscow"))
     all_trades = list(trade_simulator.trades())
-    trade_rows = [_trade_row(task=task, trade=trade) for trade in all_trades]
+    trade_rows = [
+        _trade_row(
+            task=task,
+            trade=trade,
+            timezone_name=timezone_name,
+        )
+        for trade in all_trades
+    ]
     closed_trades = [trade for trade in all_trades if trade.closed_at is not None]
     point_stats = _point_stats(closed_trades)
+    trading_days = _trading_days_count(
+        candles=ordered,
+        report_start_utc=report_start_utc,
+        report_end_utc=report_end_utc,
+        timezone_name=timezone_name,
+    )
+    trades_per_day = _trades_per_day(closed=len(closed_trades), trading_days=trading_days)
+    trade_breakdowns = _trade_breakdowns(
+        closed_trades=closed_trades,
+        timezone_name=timezone_name,
+    )
+    quality_analytics = _trade_quality_analytics(closed_trades=closed_trades)
 
     summary_global = stats_engine.summary().get("global", {})
     wins = int(summary_global.get("wins", 0))
@@ -375,6 +397,8 @@ def run_combo_backtest(
         "win_rate": win_rate,
         "win_rate_pct": win_rate * 100.0,
         "loss_rate_pct": loss_rate * 100.0,
+        "trading_days": trading_days,
+        "trades_per_day": trades_per_day,
         "gross_pnl": float(summary_global.get("gross_pnl", 0.0)),
         "net_pnl": float(summary_global.get("net_pnl", 0.0)),
         "fees": float(summary_global.get("fees", 0.0)),
@@ -392,6 +416,15 @@ def run_combo_backtest(
         "avg_loss_points_abs": point_stats["avg_loss_points_abs"],
         "gross_wins_points": point_stats["gross_wins_points"],
         "gross_losses_points_abs": point_stats["gross_losses_points_abs"],
+        "long_closed": trade_breakdowns["long_closed"],
+        "short_closed": trade_breakdowns["short_closed"],
+        "hour_distribution": trade_breakdowns["hour_distribution"],
+        "weekday_distribution": trade_breakdowns["weekday_distribution"],
+        "exit_reason_breakdown": trade_breakdowns["exit_reason_breakdown"],
+        "entry_mode_breakdown": trade_breakdowns["entry_mode_breakdown"],
+        "reason_code_expectancy": quality_analytics["reason_code_expectancy"],
+        "setup_quality_expectancy": quality_analytics["setup_quality_expectancy"],
+        "signal_quality_expectancy": quality_analytics["signal_quality_expectancy"],
         "signals_rows": len(signal_rows),
         "trades_rows": len(trade_rows),
         "events_rows": len(event_rows),
@@ -512,7 +545,8 @@ def build_russian_report(
             f"{item.profile} | {item.strategy} | {item.instrument}: "
             f"net={m.get('net_pnl', 0.0):.4f} п., closed={m.get('closed', 0)}, "
             f"winrate={m.get('win_rate_pct', 0.0):.2f}%, PF={m.get('profit_factor', 0.0):.3f}, "
-            f"max_dd={m.get('max_drawdown', 0.0):.4f} п."
+            f"max_dd={m.get('max_drawdown', 0.0):.4f} п., "
+            f"trades/day={m.get('trades_per_day', 0.0):.2f}"
         )
     lines.append("")
 
@@ -528,6 +562,8 @@ def build_russian_report(
             f"wins={m.get('wins', 0)}, losses={m.get('losses', 0)}, "
             f"winrate={m.get('win_rate_pct', 0.0):.2f}%, net={m.get('net_pnl', 0.0):.4f} п., "
             f"fees={m.get('fees', 0.0):.4f}, PF={m.get('profit_factor', 0.0):.3f}, "
+            f"tpd={m.get('trades_per_day', 0.0):.2f}, "
+            f"long/short={m.get('long_closed', 0)}/{m.get('short_closed', 0)}, "
             f"avg_win={m.get('avg_win_points', 0.0):.4f} п., "
             f"avg_loss={m.get('avg_loss_points_abs', 0.0):.4f} п."
         )
@@ -578,7 +614,10 @@ def _map_history_interval(*, timeframe: str, candle_interval_cls: Any) -> Any:
     return getattr(candle_interval_cls, attr)
 
 
-def _trade_row(*, task: ComboTask, trade: SimulatedTrade) -> dict[str, Any]:
+def _trade_row(*, task: ComboTask, trade: SimulatedTrade, timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    entry_time = trade.activated_at or trade.created_at
+    entry_local = entry_time.astimezone(zone)
     return {
         "profile": task.profile,
         "strategy": task.strategy,
@@ -590,6 +629,9 @@ def _trade_row(*, task: ComboTask, trade: SimulatedTrade) -> dict[str, Any]:
         "created_at": trade.created_at.isoformat(),
         "activated_at": trade.activated_at.isoformat() if trade.activated_at else "",
         "closed_at": trade.closed_at.isoformat() if trade.closed_at else "",
+        "entry_hour_local": entry_local.hour,
+        "entry_weekday_local": entry_local.weekday(),
+        "entry_mode": str(trade.metadata.get("entry_mode", "")),
         "entry": trade.entry,
         "entry_fill_price": trade.entry_fill_price if trade.entry_fill_price is not None else "",
         "stop_loss": trade.stop_loss,
@@ -623,6 +665,68 @@ def _event_row(*, task: ComboTask, event: TradeEvent) -> dict[str, Any]:
     }
 
 
+def _trading_days_count(
+    *,
+    candles: list[Candle],
+    report_start_utc: datetime,
+    report_end_utc: datetime,
+    timezone_name: str,
+) -> int:
+    zone = ZoneInfo(timezone_name)
+    trade_days: set[date] = set()
+    for candle in candles:
+        if candle.datetime < report_start_utc or candle.datetime > report_end_utc:
+            continue
+        trade_days.add(candle.datetime.astimezone(zone).date())
+    return max(1, len(trade_days))
+
+
+def _trades_per_day(*, closed: int, trading_days: int) -> float:
+    return float(closed) / float(max(1, trading_days))
+
+
+def _trade_breakdowns(*, closed_trades: list[SimulatedTrade], timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    long_closed = 0
+    short_closed = 0
+    hour_counter: Counter[int] = Counter()
+    weekday_counter: Counter[int] = Counter()
+    exit_reason_counter: Counter[str] = Counter()
+    entry_mode_counter: Counter[str] = Counter()
+
+    for trade in closed_trades:
+        if trade.direction.value == "LONG":
+            long_closed += 1
+        else:
+            short_closed += 1
+
+        entry_time = trade.activated_at or trade.created_at
+        local_entry = entry_time.astimezone(zone)
+        hour_counter[local_entry.hour] += 1
+        weekday_counter[local_entry.weekday()] += 1
+
+        exit_reason = (trade.exit_reason or "").strip() or "unknown"
+        exit_reason_counter[exit_reason] += 1
+
+        entry_mode = str(trade.metadata.get("entry_mode", "")).strip() or "unknown"
+        entry_mode_counter[entry_mode] += 1
+
+    return {
+        "long_closed": long_closed,
+        "short_closed": short_closed,
+        "hour_distribution": {str(hour): int(hour_counter[hour]) for hour in sorted(hour_counter)},
+        "weekday_distribution": {
+            str(weekday): int(weekday_counter[weekday]) for weekday in sorted(weekday_counter)
+        },
+        "exit_reason_breakdown": {
+            key: int(value) for key, value in sorted(exit_reason_counter.items(), key=lambda row: row[0])
+        },
+        "entry_mode_breakdown": {
+            key: int(value) for key, value in sorted(entry_mode_counter.items(), key=lambda row: row[0])
+        },
+    }
+
+
 def _point_stats(trades: list[SimulatedTrade]) -> dict[str, float]:
     wins = [item.net_pnl for item in trades if item.net_pnl >= 0]
     losses = [item.net_pnl for item in trades if item.net_pnl < 0]
@@ -635,3 +739,138 @@ def _point_stats(trades: list[SimulatedTrade]) -> dict[str, float]:
         "gross_losses_points_abs": gross_losses_abs,
     }
 
+
+def _trade_quality_analytics(*, closed_trades: list[SimulatedTrade]) -> dict[str, dict[str, dict[str, Any]]]:
+    reason_groups: dict[str, list[float]] = {}
+    setup_quality_groups: dict[str, list[float]] = {}
+    signal_quality_groups: dict[str, list[float]] = {}
+
+    for trade in closed_trades:
+        value = float(trade.net_pnl)
+        reasons = _extract_reason_codes(trade.metadata)
+        if not reasons:
+            reasons = ("none",)
+        for reason in set(reasons):
+            reason_groups.setdefault(reason, []).append(value)
+
+        setup_quality = _safe_quality_value(trade.metadata.get("setup_quality_score"))
+        if setup_quality is not None:
+            setup_bucket = _setup_quality_bucket(setup_quality)
+            setup_quality_groups.setdefault(setup_bucket, []).append(value)
+
+        signal_quality = _safe_quality_value(trade.metadata.get("signal_quality_score"))
+        if signal_quality is not None:
+            signal_bucket = _signal_quality_bucket(signal_quality)
+            signal_quality_groups.setdefault(signal_bucket, []).append(value)
+
+    return {
+        "reason_code_expectancy": _expectancy_breakdown(reason_groups, _reason_sort_key),
+        "setup_quality_expectancy": _expectancy_breakdown(setup_quality_groups, _setup_bucket_sort_key),
+        "signal_quality_expectancy": _expectancy_breakdown(signal_quality_groups, _signal_bucket_sort_key),
+    }
+
+
+def _expectancy_breakdown(
+    groups: dict[str, list[float]],
+    sorter: Any,
+) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for key in sorted(groups.keys(), key=sorter):
+        values = groups.get(key, [])
+        if not values:
+            continue
+        closed = len(values)
+        wins = sum(1 for item in values if item >= 0.0)
+        losses = closed - wins
+        net = float(sum(values))
+        gross_wins = float(sum(item for item in values if item >= 0.0))
+        gross_losses_abs = float(sum(abs(item) for item in values if item < 0.0))
+        out[key] = {
+            "closed": closed,
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": (wins / closed) * 100.0 if closed > 0 else 0.0,
+            "net_pnl": net,
+            "expectancy": net / closed if closed > 0 else 0.0,
+            "profit_factor": (gross_wins / gross_losses_abs) if gross_losses_abs > 0 else 0.0,
+        }
+    return out
+
+
+def _extract_reason_codes(metadata: dict[str, Any]) -> tuple[str, ...]:
+    raw = metadata.get("reason_codes")
+    if isinstance(raw, str):
+        candidate = raw.strip()
+        return (candidate,) if candidate else tuple()
+    if isinstance(raw, (list, tuple, set)):
+        out: list[str] = []
+        for item in raw:
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return tuple(out)
+    return tuple()
+
+
+def _safe_quality_value(raw: Any) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(value):
+        return None
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+def _setup_quality_bucket(value: float) -> str:
+    if value < 0.45:
+        return "<0.45"
+    if value < 0.55:
+        return "0.45-0.55"
+    if value < 0.65:
+        return "0.55-0.65"
+    if value < 0.75:
+        return "0.65-0.75"
+    return ">=0.75"
+
+
+def _signal_quality_bucket(value: float) -> str:
+    if value < 0.55:
+        return "<0.55"
+    if value < 0.65:
+        return "0.55-0.65"
+    if value < 0.75:
+        return "0.65-0.75"
+    if value < 0.85:
+        return "0.75-0.85"
+    return ">=0.85"
+
+
+def _setup_bucket_sort_key(value: str) -> tuple[int, str]:
+    order = {
+        "<0.45": 0,
+        "0.45-0.55": 1,
+        "0.55-0.65": 2,
+        "0.65-0.75": 3,
+        ">=0.75": 4,
+    }
+    return (order.get(value, 100), value)
+
+
+def _signal_bucket_sort_key(value: str) -> tuple[int, str]:
+    order = {
+        "<0.55": 0,
+        "0.55-0.65": 1,
+        "0.65-0.75": 2,
+        "0.75-0.85": 3,
+        ">=0.85": 4,
+    }
+    return (order.get(value, 100), value)
+
+
+def _reason_sort_key(value: str) -> str:
+    return value

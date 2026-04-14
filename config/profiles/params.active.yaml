@@ -1,7 +1,6 @@
-﻿timezone: "Europe/Moscow"
-
+timezone: Europe/Moscow
 market_data:
-  mode: "t_invest"  # demo | t_invest
+  mode: t_invest
   reconnect_delay_seconds: 5
   candle_interval_seconds: 1
   base_prices:
@@ -9,30 +8,24 @@ market_data:
     SILVER: 36.0
     BRENT: 84.0
     NG: 2.6
-
 history_preload:
   enabled: true
   bars: 0
   extra_bars: 30
   request_limit_multiplier: 3
-
-news_blackout_file: "news_blackout.yaml"
+news_blackout_file: news_blackout.yaml
 max_eval_candles: 350
-
 storage:
-  db_path: "signals.db"
-
+  db_path: signals.db
 signal_filter:
   commission_roundtrip: 0.0008
   safety_multiplier: 1.5
-
 trade_simulator:
   commission_per_side: 0.0004
   max_wait_bars: 12
   max_trade_bars: 180
   move_stop_to_breakeven: true
   intrabar_stop_priority: true
-
 telegram:
   enabled: true
   retry_attempts: 2
@@ -42,19 +35,21 @@ telegram:
   summary_interval_seconds: 0
   send_startup_message: true
   send_shutdown_summary: true
-
 strategy_params:
   by_instrument:
     ES:
       trend_pullback_vwap_ema:
         enabled: false
-        blocked_entry_hours_local: [14, 20, 21]
+        blocked_entry_hours_local:
+        - 14
+        - 20
+        - 21
         tp1_r: 0.75
         tp2_r: 1.35
         confirmation_close_delta_atr: 0.02
         use_mtf_filter: true
-        trend_timeframe: "1hour"
-        setup_timeframe: "15min"
+        trend_timeframe: 1hour
+        setup_timeframe: 15min
       compression_breakout:
         enabled: false
         range_min_atr: 0.45
@@ -72,17 +67,28 @@ strategy_params:
         tp1_r: 0.9
         tp2_r: 1.6
         use_mtf_filter: true
-
     SILVER:
       trend_pullback_vwap_ema:
         enabled: true
-        blocked_entry_hours_local: [15, 17, 20]
-        tp1_r: 0.9
-        tp2_r: 1.8
+        enforce_setup_quality_threshold: true
+        min_setup_quality_score: 0.58
+        blocked_entry_hours_local:
+        - 14
+        - 15
+        - 16
+        - 17
+        - 20
+        low_expectancy_hours_local:
+        - 18
+        block_low_expectancy_hours: true
+        tp1_r: 1.0
+        tp2_r: 2.0
         confirmation_close_delta_atr: 0.0
         use_mtf_filter: false
-        trend_timeframe: "1hour"
-        setup_timeframe: "15min"
+        trend_timeframe: 1hour
+        setup_timeframe: 15min
+        blocked_entry_weekdays_local:
+        - 3
       compression_breakout:
         enabled: false
         range_min_atr: 0.45
@@ -100,17 +106,19 @@ strategy_params:
         tp1_r: 0.9
         tp2_r: 1.6
         use_mtf_filter: true
-
     BRENT:
       trend_pullback_vwap_ema:
         enabled: false
-        blocked_entry_hours_local: [14, 20, 21]
+        blocked_entry_hours_local:
+        - 14
+        - 20
+        - 21
         tp1_r: 0.75
         tp2_r: 1.35
         confirmation_close_delta_atr: 0.02
         use_mtf_filter: true
-        trend_timeframe: "1hour"
-        setup_timeframe: "15min"
+        trend_timeframe: 1hour
+        setup_timeframe: 15min
       compression_breakout:
         enabled: false
         range_min_atr: 0.45
@@ -128,17 +136,19 @@ strategy_params:
         tp1_r: 0.9
         tp2_r: 1.6
         use_mtf_filter: true
-
     NG:
       trend_pullback_vwap_ema:
         enabled: false
-        blocked_entry_hours_local: [14, 20, 21]
+        blocked_entry_hours_local:
+        - 14
+        - 20
+        - 21
         tp1_r: 0.75
         tp2_r: 1.35
         confirmation_close_delta_atr: 0.02
         use_mtf_filter: true
-        trend_timeframe: "1hour"
-        setup_timeframe: "15min"
+        trend_timeframe: 1hour
+        setup_timeframe: 15min
       compression_breakout:
         enabled: false
         range_min_atr: 0.45

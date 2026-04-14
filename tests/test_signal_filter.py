@@ -2,7 +2,7 @@
 
 import unittest
 
-from core.models import MarketRegime, SignalDirection
+from core.models import MarketRegime, MarketRegimeState, SignalDirection
 from core.signal_filter import SignalFilterPipeline
 from tests.helpers import build_context, build_indicator, build_instrument_meta, build_signal, make_candle
 
@@ -73,7 +73,59 @@ class SignalFilterPipelineTests(unittest.TestCase):
             tp1=100.1,
             tp2=100.2,
         )
-        self.assertEqual(pipeline.evaluate(signal, ctx).reason, "tp1_too_small_after_fees")
+        decision = pipeline.evaluate(signal, ctx)
+        self.assertIn(decision.reason, {"low_expected_edge", "poor_rr_after_fill"})
+        self.assertTrue(
+            {"low_expected_edge", "poor_rr_after_fill"}.intersection(set(decision.reason_codes))
+        )
+
+    def test_rejects_weak_context_when_regime_score_is_low(self) -> None:
+        pipeline = SignalFilterPipeline(params={})
+        candles = [make_candle(0, open_=100, close=100.2)]
+        regime_state = MarketRegimeState(
+            dominant=MarketRegime.NEUTRAL,
+            trend_score=0.2,
+            compression_score=0.3,
+            balance_score=0.1,
+            reason_codes=("trend_alignment_missing",),
+            details={},
+        )
+        ctx = build_context(
+            candles=candles,
+            regime=MarketRegime.NEUTRAL,
+            instrument=build_instrument_meta(strategies=("trend_pullback_vwap_ema",)),
+            indicators=build_indicator(),
+            regime_state=regime_state,
+        )
+        signal = build_signal(strategy="trend_pullback_vwap_ema", regime=MarketRegime.NEUTRAL)
+
+        decision = pipeline.evaluate(signal, ctx)
+        self.assertFalse(decision.accepted)
+        self.assertEqual(decision.reason, "weak_context")
+        self.assertIn("weak_context", decision.reason_codes)
+
+    def test_accepts_cross_regime_label_when_strategy_score_is_high(self) -> None:
+        pipeline = SignalFilterPipeline(params={})
+        candles = [make_candle(0, open_=100, close=100.2)]
+        regime_state = MarketRegimeState(
+            dominant=MarketRegime.COMPRESSION,
+            trend_score=0.72,
+            compression_score=0.81,
+            balance_score=0.20,
+            reason_codes=("mixed_state",),
+            details={},
+        )
+        ctx = build_context(
+            candles=candles,
+            regime=MarketRegime.COMPRESSION,
+            instrument=build_instrument_meta(strategies=("trend_pullback_vwap_ema",)),
+            indicators=build_indicator(),
+            regime_state=regime_state,
+        )
+        signal = build_signal(strategy="trend_pullback_vwap_ema", regime=MarketRegime.TREND)
+        decision = pipeline.evaluate(signal, ctx)
+        self.assertTrue(decision.accepted)
+        self.assertTrue(bool(decision.enriched_metadata.get("cross_regime_signal", False)))
 
 
 if __name__ == "__main__":

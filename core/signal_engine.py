@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import deque
+from dataclasses import replace
 from dataclasses import dataclass
 from typing import Any
 
@@ -82,7 +83,8 @@ class SignalEngine:
         if snapshot is None:
             return EngineResult(None, tuple(), tuple())
 
-        regime = self._regime_classifier.classify(snapshot)
+        regime_state = self._regime_classifier.classify_state(snapshot)
+        regime = regime_state.dominant
         session_state = self._session_manager.get_state(instrument_meta, candles[-1].datetime)
         blackout, blackout_reason = self._blackout_filter.is_blocked(candles[-1].datetime)
 
@@ -96,6 +98,7 @@ class SignalEngine:
             blackout_active=blackout,
             blackout_reason=blackout_reason,
             params=self._params,
+            regime_state=regime_state,
         )
 
         accepted: list[StrategySignal] = []
@@ -121,10 +124,17 @@ class SignalEngine:
                 rejected_reasons.append(f"{strategy_name}:{decision.reason}")
                 continue
 
+            accepted_signal = raw
+            if decision.enriched_metadata:
+                accepted_signal = replace(
+                    raw,
+                    metadata=dict(raw.metadata) | dict(decision.enriched_metadata),
+                )
+
             dedupe_key = (
-                raw.instrument,
-                raw.strategy,
-                raw.timestamp.isoformat(),
+                accepted_signal.instrument,
+                accepted_signal.strategy,
+                accepted_signal.timestamp.isoformat(),
             )
             if dedupe_key in self._accepted_keys_set:
                 rejected_reasons.append(f"{strategy_name}:duplicate")
@@ -135,7 +145,7 @@ class SignalEngine:
             if len(self._accepted_keys_queue) > self._dedupe_history_limit:
                 oldest = self._accepted_keys_queue.popleft()
                 self._accepted_keys_set.discard(oldest)
-            accepted.append(raw)
+            accepted.append(accepted_signal)
 
         return EngineResult(
             regime=regime,

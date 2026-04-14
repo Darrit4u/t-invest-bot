@@ -16,7 +16,12 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
     allowed_regime = MarketRegime.BALANCE
 
     def evaluate(self, context: StrategyContext) -> StrategySignal | None:
-        if context.regime != self.allowed_regime:
+        context_score = _strategy_context_score(
+            context=context,
+            strategy_name=self.name,
+            fallback_regime=self.allowed_regime,
+        )
+        if context_score < self._float("strategy_context_score_min", 0.0):
             return None
 
         candles = context.candles
@@ -33,12 +38,25 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
 
         short_signal = self._try_short(context, reference_window, sweep, confirm)
         if short_signal is not None:
-            return self._apply_mtf_alignment(context=context, signal=short_signal)
+            return self._apply_mtf_alignment(
+                context=context,
+                signal=self._with_context_score(signal=short_signal, context_score=context_score),
+            )
 
         long_signal = self._try_long(context, reference_window, sweep, confirm)
         if long_signal is None:
             return None
-        return self._apply_mtf_alignment(context=context, signal=long_signal)
+        return self._apply_mtf_alignment(
+            context=context,
+            signal=self._with_context_score(signal=long_signal, context_score=context_score),
+        )
+
+    @staticmethod
+    def _with_context_score(*, signal: StrategySignal, context_score: float) -> StrategySignal:
+        return replace(
+            signal,
+            metadata=dict(signal.metadata) | {"strategy_context_score": float(context_score)},
+        )
 
     def _apply_mtf_alignment(
         self,
@@ -304,3 +322,15 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
         sweep_component = max(0.0, self._float("return_close_sweep_mult", 1.0)) * sweep_size
         range_component = max(0.0, self._float("return_close_range_share", 0.08)) * reference_range
         return max(base, sweep_component, range_component)
+
+
+def _strategy_context_score(
+    *,
+    context: StrategyContext,
+    strategy_name: str,
+    fallback_regime: MarketRegime,
+) -> float:
+    state = context.regime_state
+    if state is not None:
+        return float(state.score_for_strategy(strategy_name))
+    return 1.0 if context.regime == fallback_regime else 0.0

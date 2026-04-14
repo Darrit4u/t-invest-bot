@@ -17,7 +17,12 @@ class CompressionBreakoutStrategy(BaseStrategy):
     allowed_regime = MarketRegime.COMPRESSION
 
     def evaluate(self, context: StrategyContext) -> StrategySignal | None:
-        if context.regime != self.allowed_regime:
+        context_score = _strategy_context_score(
+            context=context,
+            strategy_name=self.name,
+            fallback_regime=self.allowed_regime,
+        )
+        if context_score < self._float("strategy_context_score_min", 0.0):
             return None
 
         bars = self._int("compression_window_bars", 12)
@@ -26,12 +31,25 @@ class CompressionBreakoutStrategy(BaseStrategy):
 
         signal = self._evaluate_immediate(context, bars)
         if signal is not None:
-            return self._apply_mtf_alignment(context=context, signal=signal)
+            return self._apply_mtf_alignment(
+                context=context,
+                signal=self._with_context_score(signal=signal, context_score=context_score),
+            )
 
         signal = self._evaluate_retest(context, bars)
         if signal is None:
             return None
-        return self._apply_mtf_alignment(context=context, signal=signal)
+        return self._apply_mtf_alignment(
+            context=context,
+            signal=self._with_context_score(signal=signal, context_score=context_score),
+        )
+
+    @staticmethod
+    def _with_context_score(*, signal: StrategySignal, context_score: float) -> StrategySignal:
+        return replace(
+            signal,
+            metadata=dict(signal.metadata) | {"strategy_context_score": float(context_score)},
+        )
 
     def _apply_mtf_alignment(
         self,
@@ -306,3 +324,15 @@ class CompressionBreakoutStrategy(BaseStrategy):
                 "bars_since_breakout": bars_since_breakout,
             },
         )
+
+
+def _strategy_context_score(
+    *,
+    context: StrategyContext,
+    strategy_name: str,
+    fallback_regime: MarketRegime,
+) -> float:
+    state = context.regime_state
+    if state is not None:
+        return float(state.score_for_strategy(strategy_name))
+    return 1.0 if context.regime == fallback_regime else 0.0

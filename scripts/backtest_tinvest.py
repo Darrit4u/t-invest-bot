@@ -264,6 +264,8 @@ def combo_summary_row(result: ComboRunResult) -> dict[str, Any]:
         "losses": metrics.get("losses", 0),
         "win_rate_pct": metrics.get("win_rate_pct", 0.0),
         "loss_rate_pct": metrics.get("loss_rate_pct", 0.0),
+        "trading_days": metrics.get("trading_days", 0),
+        "trades_per_day": metrics.get("trades_per_day", 0.0),
         "net_pnl": metrics.get("net_pnl", 0.0),
         "gross_pnl": metrics.get("gross_pnl", 0.0),
         "fees": metrics.get("fees", 0.0),
@@ -273,8 +275,208 @@ def combo_summary_row(result: ComboRunResult) -> dict[str, Any]:
         "max_drawdown": metrics.get("max_drawdown", 0.0),
         "avg_win_points": metrics.get("avg_win_points", 0.0),
         "avg_loss_points_abs": metrics.get("avg_loss_points_abs", 0.0),
+        "long_closed": metrics.get("long_closed", 0),
+        "short_closed": metrics.get("short_closed", 0),
+        "hour_distribution_json": json.dumps(metrics.get("hour_distribution", {}), ensure_ascii=False),
+        "weekday_distribution_json": json.dumps(metrics.get("weekday_distribution", {}), ensure_ascii=False),
+        "exit_reason_breakdown_json": json.dumps(
+            metrics.get("exit_reason_breakdown", {}),
+            ensure_ascii=False,
+        ),
+        "entry_mode_breakdown_json": json.dumps(
+            metrics.get("entry_mode_breakdown", {}),
+            ensure_ascii=False,
+        ),
+        "reason_code_expectancy_json": json.dumps(
+            metrics.get("reason_code_expectancy", {}),
+            ensure_ascii=False,
+        ),
+        "setup_quality_expectancy_json": json.dumps(
+            metrics.get("setup_quality_expectancy", {}),
+            ensure_ascii=False,
+        ),
+        "signal_quality_expectancy_json": json.dumps(
+            metrics.get("signal_quality_expectancy", {}),
+            ensure_ascii=False,
+        ),
         "open_trades": metrics.get("open_trades", 0),
     }
+
+
+def _expectancy_table(
+    *,
+    rows: list[dict[str, Any]],
+    bucket_field: str,
+    bucket_name: str,
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, float]] = {}
+    for row in rows:
+        if not str(row.get("closed_at", "")).strip():
+            continue
+        raw_bucket = row.get(bucket_field, "")
+        bucket_value = str(raw_bucket)
+        if bucket_value == "":
+            continue
+        net = float(row.get("net_pnl", 0.0) or 0.0)
+        bucket = buckets.setdefault(
+            bucket_value,
+            {
+                "closed": 0.0,
+                "wins": 0.0,
+                "losses": 0.0,
+                "net_pnl": 0.0,
+                "gross_wins": 0.0,
+                "gross_losses_abs": 0.0,
+            },
+        )
+        bucket["closed"] += 1.0
+        bucket["net_pnl"] += net
+        if net >= 0:
+            bucket["wins"] += 1.0
+            bucket["gross_wins"] += net
+        else:
+            bucket["losses"] += 1.0
+            bucket["gross_losses_abs"] += abs(net)
+
+    def _sort_key(item: tuple[str, dict[str, float]]) -> tuple[int, str]:
+        key, _ = item
+        try:
+            return int(key), key
+        except ValueError:
+            return 10_000, key
+
+    output: list[dict[str, Any]] = []
+    for bucket_value, data in sorted(buckets.items(), key=_sort_key):
+        closed = int(data["closed"])
+        wins = int(data["wins"])
+        losses = int(data["losses"])
+        gross_losses_abs = float(data["gross_losses_abs"])
+        profit_factor = (float(data["gross_wins"]) / gross_losses_abs) if gross_losses_abs > 0 else 0.0
+        output.append(
+            {
+                bucket_name: bucket_value,
+                "closed": closed,
+                "wins": wins,
+                "losses": losses,
+                "win_rate_pct": (wins / closed * 100.0) if closed else 0.0,
+                "net_pnl": float(data["net_pnl"]),
+                "expectancy": (float(data["net_pnl"]) / closed) if closed else 0.0,
+                "profit_factor": profit_factor,
+            }
+        )
+    return output
+
+
+def _metadata_expectancy_table(
+    *,
+    rows: list[dict[str, Any]],
+    bucket_name: str,
+    resolve_buckets: Any,
+) -> list[dict[str, Any]]:
+    buckets: dict[str, dict[str, float]] = {}
+    for row in rows:
+        if not str(row.get("closed_at", "")).strip():
+            continue
+        metadata = _safe_trade_metadata(row)
+        bucket_values = resolve_buckets(metadata)
+        if not bucket_values:
+            continue
+
+        net = float(row.get("net_pnl", 0.0) or 0.0)
+        for bucket_value in set(bucket_values):
+            bucket = buckets.setdefault(
+                str(bucket_value),
+                {
+                    "closed": 0.0,
+                    "wins": 0.0,
+                    "losses": 0.0,
+                    "net_pnl": 0.0,
+                    "gross_wins": 0.0,
+                    "gross_losses_abs": 0.0,
+                },
+            )
+            bucket["closed"] += 1.0
+            bucket["net_pnl"] += net
+            if net >= 0:
+                bucket["wins"] += 1.0
+                bucket["gross_wins"] += net
+            else:
+                bucket["losses"] += 1.0
+                bucket["gross_losses_abs"] += abs(net)
+
+    output: list[dict[str, Any]] = []
+    for bucket_value, data in sorted(buckets.items(), key=lambda item: item[0]):
+        closed = int(data["closed"])
+        wins = int(data["wins"])
+        losses = int(data["losses"])
+        gross_losses_abs = float(data["gross_losses_abs"])
+        profit_factor = (float(data["gross_wins"]) / gross_losses_abs) if gross_losses_abs > 0 else 0.0
+        output.append(
+            {
+                bucket_name: bucket_value,
+                "closed": closed,
+                "wins": wins,
+                "losses": losses,
+                "win_rate_pct": (wins / closed * 100.0) if closed else 0.0,
+                "net_pnl": float(data["net_pnl"]),
+                "expectancy": (float(data["net_pnl"]) / closed) if closed else 0.0,
+                "profit_factor": profit_factor,
+            }
+        )
+    return output
+
+
+def _safe_trade_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("metadata_json", "{}")
+    if not isinstance(raw, str):
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _reason_code_buckets(metadata: dict[str, Any]) -> tuple[str, ...]:
+    raw = metadata.get("reason_codes")
+    if isinstance(raw, str):
+        text = raw.strip()
+        return (text,) if text else ("none",)
+    if isinstance(raw, (list, tuple, set)):
+        values = tuple(str(item).strip() for item in raw if str(item).strip())
+        return values or ("none",)
+    return ("none",)
+
+
+def _quality_bucket(value: float, *, thresholds: tuple[float, ...]) -> str:
+    if value < thresholds[0]:
+        return f"<{thresholds[0]:.2f}"
+    for idx in range(1, len(thresholds)):
+        if value < thresholds[idx]:
+            return f"{thresholds[idx - 1]:.2f}-{thresholds[idx]:.2f}"
+    return f">={thresholds[-1]:.2f}"
+
+
+def _setup_quality_bucket(metadata: dict[str, Any]) -> tuple[str, ...]:
+    raw = metadata.get("setup_quality_score")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return tuple()
+    value = max(0.0, min(1.0, value))
+    return (_quality_bucket(value, thresholds=(0.45, 0.55, 0.65, 0.75)),)
+
+
+def _signal_quality_bucket(metadata: dict[str, Any]) -> tuple[str, ...]:
+    raw = metadata.get("signal_quality_score")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return tuple()
+    value = max(0.0, min(1.0, value))
+    return (_quality_bucket(value, thresholds=(0.55, 0.65, 0.75, 0.85)),)
 
 
 def main() -> int:
@@ -482,6 +684,8 @@ def main() -> int:
         "losses",
         "win_rate_pct",
         "loss_rate_pct",
+        "trading_days",
+        "trades_per_day",
         "net_pnl",
         "gross_pnl",
         "fees",
@@ -491,6 +695,15 @@ def main() -> int:
         "max_drawdown",
         "avg_win_points",
         "avg_loss_points_abs",
+        "long_closed",
+        "short_closed",
+        "hour_distribution_json",
+        "weekday_distribution_json",
+        "exit_reason_breakdown_json",
+        "entry_mode_breakdown_json",
+        "reason_code_expectancy_json",
+        "setup_quality_expectancy_json",
+        "signal_quality_expectancy_json",
         "open_trades",
     ]
     write_csv(out_dir / "combo_summary.csv", rows=combo_rows, fieldnames=combo_fields)
@@ -523,6 +736,9 @@ def main() -> int:
         "created_at",
         "activated_at",
         "closed_at",
+        "entry_hour_local",
+        "entry_weekday_local",
+        "entry_mode",
         "entry",
         "entry_fill_price",
         "stop_loss",
@@ -539,6 +755,89 @@ def main() -> int:
         "metadata_json",
     ]
     write_csv(out_dir / "trades.csv", rows=all_trades, fieldnames=trade_fields)
+
+    hour_expectancy = _expectancy_table(rows=all_trades, bucket_field="entry_hour_local", bucket_name="hour")
+    weekday_expectancy = _expectancy_table(
+        rows=all_trades,
+        bucket_field="entry_weekday_local",
+        bucket_name="weekday",
+    )
+    write_csv(
+        out_dir / "expectancy_by_hour.csv",
+        rows=hour_expectancy,
+        fieldnames=["hour", "closed", "wins", "losses", "win_rate_pct", "net_pnl", "expectancy", "profit_factor"],
+    )
+    write_csv(
+        out_dir / "expectancy_by_weekday.csv",
+        rows=weekday_expectancy,
+        fieldnames=[
+            "weekday",
+            "closed",
+            "wins",
+            "losses",
+            "win_rate_pct",
+            "net_pnl",
+            "expectancy",
+            "profit_factor",
+        ],
+    )
+    reason_code_expectancy = _metadata_expectancy_table(
+        rows=all_trades,
+        bucket_name="reason_code",
+        resolve_buckets=_reason_code_buckets,
+    )
+    setup_quality_expectancy = _metadata_expectancy_table(
+        rows=all_trades,
+        bucket_name="setup_quality_bucket",
+        resolve_buckets=_setup_quality_bucket,
+    )
+    signal_quality_expectancy = _metadata_expectancy_table(
+        rows=all_trades,
+        bucket_name="signal_quality_bucket",
+        resolve_buckets=_signal_quality_bucket,
+    )
+    write_csv(
+        out_dir / "expectancy_by_reason_code.csv",
+        rows=reason_code_expectancy,
+        fieldnames=[
+            "reason_code",
+            "closed",
+            "wins",
+            "losses",
+            "win_rate_pct",
+            "net_pnl",
+            "expectancy",
+            "profit_factor",
+        ],
+    )
+    write_csv(
+        out_dir / "expectancy_by_setup_quality.csv",
+        rows=setup_quality_expectancy,
+        fieldnames=[
+            "setup_quality_bucket",
+            "closed",
+            "wins",
+            "losses",
+            "win_rate_pct",
+            "net_pnl",
+            "expectancy",
+            "profit_factor",
+        ],
+    )
+    write_csv(
+        out_dir / "expectancy_by_signal_quality.csv",
+        rows=signal_quality_expectancy,
+        fieldnames=[
+            "signal_quality_bucket",
+            "closed",
+            "wins",
+            "losses",
+            "win_rate_pct",
+            "net_pnl",
+            "expectancy",
+            "profit_factor",
+        ],
+    )
 
     event_fields = [
         "profile",
@@ -586,10 +885,14 @@ def main() -> int:
     print("- signals.csv")
     print("- trades.csv")
     print("- events.csv")
+    print("- expectancy_by_hour.csv")
+    print("- expectancy_by_weekday.csv")
+    print("- expectancy_by_reason_code.csv")
+    print("- expectancy_by_setup_quality.csv")
+    print("- expectancy_by_signal_quality.csv")
     print("- summary.json")
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

@@ -12,6 +12,7 @@ from core.market_data import Candle
 from core.models import (
     IndicatorSnapshot,
     MarketRegime,
+    MarketRegimeState,
     SignalDirection,
     StrategyContext,
     StrategySignal,
@@ -162,6 +163,7 @@ def build_context(
     session_active: bool = True,
     blackout_active: bool = False,
     params: dict | None = None,
+    regime_state: MarketRegimeState | None = None,
 ) -> StrategyContext:
     meta = instrument or build_instrument_meta(symbol=candles[-1].instrument)
     snapshot = indicators or build_indicator(timestamp=candles[-1].datetime)
@@ -175,6 +177,7 @@ def build_context(
         blackout_active=blackout_active,
         blackout_reason="test" if blackout_active else None,
         params=params or {},
+        regime_state=regime_state,
     )
 
 

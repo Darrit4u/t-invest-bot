@@ -51,6 +51,37 @@ class IndicatorSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class MarketRegimeState:
+    """Score-based regime state with dominant label and reason codes."""
+
+    dominant: MarketRegime
+    trend_score: float
+    compression_score: float
+    balance_score: float
+    reason_codes: tuple[str, ...] = field(default_factory=tuple)
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def score_for(self, regime: MarketRegime) -> float:
+        if regime == MarketRegime.TREND:
+            return float(self.trend_score)
+        if regime == MarketRegime.COMPRESSION:
+            return float(self.compression_score)
+        if regime == MarketRegime.BALANCE:
+            return float(self.balance_score)
+        return 0.0
+
+    def score_for_strategy(self, strategy: str) -> float:
+        normalized = strategy.strip().lower()
+        if normalized == "trend_pullback_vwap_ema":
+            return float(self.trend_score)
+        if normalized == "compression_breakout":
+            return float(self.compression_score)
+        if normalized == "liquidity_sweep_reversal":
+            return float(self.balance_score)
+        return 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class StrategySignal:
     """Structured signal returned by strategies and accepted by the pipeline."""
 
@@ -81,6 +112,7 @@ class StrategyContext:
     blackout_active: bool
     blackout_reason: str | None
     params: dict[str, Any]
+    regime_state: MarketRegimeState | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,3 +121,9 @@ class SignalDecision:
 
     accepted: bool
     reason: str
+    reason_codes: tuple[str, ...] = field(default_factory=tuple)
+    signal_quality_score: float = 0.0
+    expected_fill_price: float | None = None
+    post_fill_rr: float | None = None
+    expected_edge_after_fees: float | None = None
+    enriched_metadata: dict[str, Any] = field(default_factory=dict)

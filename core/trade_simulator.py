@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from core.market_data import Candle
 from core.models import SignalDirection, StrategySignal
+from core.post_fill_validation import PostFillValidationConfig, validate_post_fill
 
 
 class TradeStatus(str, Enum):
@@ -86,6 +87,7 @@ class TradeSimulator:
 
     def __init__(self, *, params: dict[str, Any], logger: Any, storage: Any | None = None):
         sim_cfg = params.get("trade_simulator", {}) if isinstance(params.get("trade_simulator", {}), dict) else {}
+        filter_cfg = params.get("signal_filter", {}) if isinstance(params.get("signal_filter", {}), dict) else {}
         self._logger = logger
         self._storage = storage
         self._commission_per_side = float(sim_cfg.get("commission_per_side", 0.0004))
@@ -97,6 +99,26 @@ class TradeSimulator:
         self._intrabar_stop_priority = bool(sim_cfg.get("intrabar_stop_priority", True))
         self._close_profitable_on_session_end = bool(
             sim_cfg.get("close_profitable_on_session_end", False)
+        )
+        self._revalidate_after_fill = bool(sim_cfg.get("revalidate_after_fill", True))
+        self._min_rr_after_fill = float(sim_cfg.get("min_rr_after_fill", 0.50))
+        self._min_expected_edge_after_fees = float(
+            sim_cfg.get("min_expected_edge_after_fees", 0.0)
+        )
+        commission_roundtrip = float(
+            sim_cfg.get(
+                "commission_roundtrip",
+                filter_cfg.get("commission_roundtrip", self._commission_per_side * 2.0),
+            )
+        )
+        safety_multiplier = float(
+            sim_cfg.get("safety_multiplier", filter_cfg.get("safety_multiplier", 1.5))
+        )
+        self._post_fill_cfg = PostFillValidationConfig(
+            commission_roundtrip=commission_roundtrip,
+            safety_multiplier=safety_multiplier,
+            min_rr_after_fill=self._min_rr_after_fill,
+            min_expected_edge_after_fees=self._min_expected_edge_after_fees,
         )
 
         self._trades: dict[str, SimulatedTrade] = {}
@@ -277,7 +299,21 @@ class TradeSimulator:
             payload={"bars_waiting": trade.bars_waiting},
         )
         self._persist_event(event)
-        return [event]
+        events = [event]
+
+        validation_ok, validation_reason = self._validate_after_fill(trade=trade)
+        if self._revalidate_after_fill and not validation_ok:
+            events.extend(
+                self._force_close(
+                    trade=trade,
+                    when=candle.datetime,
+                    price=fill_price,
+                    status=TradeStatus.EXPIRED,
+                    reason=validation_reason or "poor_rr_after_fill",
+                    event_type="expired",
+                )
+            )
+        return events
 
     def _process_active_trade(
         self,
@@ -562,3 +598,25 @@ class TradeSimulator:
 
     def get_trade(self, trade_id: str) -> SimulatedTrade | None:
         return self._trades.get(trade_id)
+
+    def _validate_after_fill(self, *, trade: SimulatedTrade) -> tuple[bool, str | None]:
+        if trade.entry_fill_price is None:
+            return False, "poor_rr_after_fill"
+
+        validation = validate_post_fill(
+            direction=trade.direction,
+            stop_loss=trade.stop_loss,
+            tp1=trade.tp1,
+            entry_price=float(trade.entry_fill_price),
+            config=self._post_fill_cfg,
+        )
+        trade.metadata["post_fill_risk"] = validation.metrics.risk
+        trade.metadata["post_fill_reward"] = validation.metrics.reward
+        trade.metadata["post_fill_rr"] = validation.metrics.post_fill_rr
+        trade.metadata["expected_edge_after_fees"] = validation.metrics.expected_edge_after_fees
+        trade.metadata["post_fill_validation_passed"] = bool(validation.accepted)
+        trade.metadata["post_fill_validation_reason"] = validation.reason or ""
+
+        if not validation.accepted:
+            return False, validation.reason or "poor_rr_after_fill"
+        return True, None

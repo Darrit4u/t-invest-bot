@@ -59,11 +59,13 @@ class TradeEdgeCaseTests(unittest.TestCase):
 
         gap_up = make_candle(1, open_=100.5, high=100.8, low=100.4, close=100.7)
         events = sim.process_candle(candle=gap_up, session_active=True, blackout_active=False, blackout_reason=None)
-        self.assertEqual([e.event_type for e in events], ["activated"])
+        self.assertEqual([e.event_type for e in events], ["activated", "expired"])
 
         trade = sim.get_trade(events[0].trade_id)
         assert trade is not None
         self.assertAlmostEqual(trade.entry_fill_price, 100.5, places=6)
+        self.assertEqual(trade.status, TradeStatus.EXPIRED)
+        self.assertEqual(trade.exit_reason, "poor_rr_after_fill")
 
     def test_gap_through_stop_closes_trade(self) -> None:
         sim = TradeSimulator(params={"trade_simulator": {}}, logger=_DummyLogger(), storage=None)
