@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from core.indicator_engine import IndicatorConfig, IndicatorEngine
@@ -13,7 +12,9 @@ from core.models import MarketRegime, StrategyContext, StrategySignal
 from core.news_filter import NewsBlackoutFilter
 from core.regime_classifier import MarketRegimeClassifier
 from core.session_manager import SessionManager
-from core.signal_filter import SignalFilterPipeline
+from core.signal_processor import SignalProcessor
+from core.strategy_params import resolve_strategy_params
+from core.trading_mode import resolve_trading_mode
 from storage.memory_store import MemoryCandleStore
 from strategies.compression_breakout import CompressionBreakoutStrategy
 from strategies.liquidity_sweep import LiquiditySweepReversalStrategy
@@ -49,19 +50,13 @@ class SignalEngine:
         indicator_cfg = _build_indicator_config(params)
         self._indicator_engine = IndicatorEngine(config=indicator_cfg)
         self._regime_classifier = MarketRegimeClassifier.from_params(params)
-        self._signal_filter = SignalFilterPipeline(params=params)
+        self._signal_processor = SignalProcessor(params=params)
         self._blackout_filter = blackout_filter
-        self._strategies = self._build_strategies(params)
+        self._strategy_params_section = _strategy_params_section(params)
+        self._trading_mode = resolve_trading_mode(params).value
+        self._strategy_classes = self._build_strategy_classes()
+        self._strategy_cache: dict[tuple[str, str], Any] = {}
         self._max_eval_candles = int(params.get("max_eval_candles", 350))
-        signal_engine_cfg = params.get("signal_engine", {})
-        if not isinstance(signal_engine_cfg, dict):
-            signal_engine_cfg = {}
-        self._dedupe_history_limit = max(
-            1000,
-            int(signal_engine_cfg.get("dedupe_history_limit", 20_000)),
-        )
-        self._accepted_keys_set: set[tuple[str, str, str]] = set()
-        self._accepted_keys_queue: deque[tuple[str, str, str]] = deque()
 
     def process_candle(self, *, instrument: str, timeframe: str) -> EngineResult:
         if instrument not in self._registry:
@@ -79,7 +74,8 @@ class SignalEngine:
         if snapshot is None:
             return EngineResult(None, tuple(), tuple())
 
-        regime = self._regime_classifier.classify(snapshot)
+        regime_state = self._regime_classifier.classify_state(snapshot)
+        regime = regime_state.dominant
         session_state = self._session_manager.get_state(instrument_meta, candles[-1].datetime)
         blackout, blackout_reason = self._blackout_filter.is_blocked(candles[-1].datetime)
 
@@ -93,40 +89,48 @@ class SignalEngine:
             blackout_active=blackout,
             blackout_reason=blackout_reason,
             params=self._params,
+            regime_state=regime_state,
         )
 
         accepted: list[StrategySignal] = []
         rejected_reasons: list[str] = []
 
         for strategy_name in instrument_meta.allowed_strategies:
-            strategy = self._strategies.get(strategy_name)
+            strategy = self._resolve_strategy(
+                instrument=instrument_meta.symbol,
+                strategy_name=strategy_name,
+            )
             if strategy is None:
                 continue
-
-            raw = strategy.evaluate(context)
-            if raw is None:
+            if not _strategy_is_enabled(strategy.params):
+                rejected_reasons.append(f"{strategy_name}:disabled")
                 continue
 
-            decision = self._signal_filter.evaluate(raw, context)
-            if not decision.accepted:
-                rejected_reasons.append(f"{strategy_name}:{decision.reason}")
+            raw_signals = strategy.generate_signals(context)
+            if not raw_signals:
                 continue
 
-            dedupe_key = (
-                raw.instrument,
-                raw.strategy,
-                raw.timestamp.isoformat(),
+            processed = self._signal_processor.process_strategy_output(
+                strategy_name=strategy_name,
+                signals=raw_signals,
+                context=context,
             )
-            if dedupe_key in self._accepted_keys_set:
-                rejected_reasons.append(f"{strategy_name}:duplicate")
-                continue
-
-            self._accepted_keys_set.add(dedupe_key)
-            self._accepted_keys_queue.append(dedupe_key)
-            if len(self._accepted_keys_queue) > self._dedupe_history_limit:
-                oldest = self._accepted_keys_queue.popleft()
-                self._accepted_keys_set.discard(oldest)
-            accepted.append(raw)
+            for signal_obj in processed.accepted_signals:
+                accepted.append(
+                    replace(
+                        signal_obj,
+                        metadata=dict(signal_obj.metadata)
+                        | {
+                            "tick_size": float(instrument_meta.tick_size),
+                            "tick_value": float(instrument_meta.tick_value),
+                            "lot": int(instrument_meta.lot),
+                            "lot_size": int(instrument_meta.lot),
+                            "min_qty": 1.0,
+                            "qty_step": 1.0,
+                        },
+                    )
+                )
+            rejected_reasons.extend(processed.rejected_reasons)
 
         return EngineResult(
             regime=regime,
@@ -134,30 +138,47 @@ class SignalEngine:
             rejected_reasons=tuple(rejected_reasons),
         )
 
-    @staticmethod
-    def _build_strategies(params: dict[str, Any]) -> dict[str, Any]:
-        section = params.get("strategy_params", {})
-        if not isinstance(section, dict):
-            section = {}
+    def _resolve_strategy(self, *, instrument: str, strategy_name: str) -> Any | None:
+        cache_key = (instrument, strategy_name)
+        cached = self._strategy_cache.get(cache_key)
+        if cached is not None:
+            return cached
 
+        strategy_cls = self._strategy_classes.get(strategy_name)
+        if strategy_cls is None:
+            return None
+
+        params = resolve_strategy_params(
+            section=self._strategy_params_section,
+            strategy_name=strategy_name,
+            instrument_symbol=instrument,
+            trading_mode=self._trading_mode,
+        )
+        strategy = strategy_cls(params=params)
+        self._strategy_cache[cache_key] = strategy
+        return strategy
+
+    @staticmethod
+    def _build_strategy_classes() -> dict[str, Any]:
         return {
-            "trend_pullback_vwap_ema": TrendPullbackVWAPEMAStrategy(
-                params=_strategy_params(section, "trend_pullback_vwap_ema")
-            ),
-            "compression_breakout": CompressionBreakoutStrategy(
-                params=_strategy_params(section, "compression_breakout")
-            ),
-            "liquidity_sweep_reversal": LiquiditySweepReversalStrategy(
-                params=_strategy_params(section, "liquidity_sweep_reversal")
-            ),
+            "trend_pullback_vwap_ema": TrendPullbackVWAPEMAStrategy,
+            "compression_breakout": CompressionBreakoutStrategy,
+            "liquidity_sweep_reversal": LiquiditySweepReversalStrategy,
         }
 
 
-def _strategy_params(section: dict[str, Any], key: str) -> dict[str, Any]:
-    value = section.get(key, {})
-    if isinstance(value, dict):
-        return value
+def _strategy_params_section(params: dict[str, Any]) -> dict[str, Any]:
+    section = params.get("strategy_params", {})
+    if isinstance(section, dict):
+        return section
     return {}
+
+
+def _strategy_is_enabled(params: dict[str, Any]) -> bool:
+    value = params.get("enabled", True)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _build_indicator_config(params: dict[str, Any]) -> IndicatorConfig:
@@ -168,6 +189,7 @@ def _build_indicator_config(params: dict[str, Any]) -> IndicatorConfig:
     return IndicatorConfig(
         ema_fast=int(section.get("ema_fast", 20)),
         ema_slow=int(section.get("ema_slow", 50)),
+        ema_trend=int(section.get("ema_trend", 200)),
         atr_period=int(section.get("atr_period", 14)),
         volume_period=int(section.get("volume_period", 20)),
         slope_period=int(section.get("slope_period", 5)),

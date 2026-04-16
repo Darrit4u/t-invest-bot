@@ -1,5 +1,5 @@
 ﻿history_depth: 500
-default_timeframe: "1min"
+default_timeframe: "1hour"
 
 session_rules:
   US_DAY:
@@ -48,14 +48,4 @@ instruments:
     sessions:
       - MOSCOW_DAY
 
-  NG:
-    enabled: true
-    ticker: "NG"
-    class_code: "SPBFUT"
-    uid: ""
-    figi: ""
-    tick_size: 0.001
-    tick_value: 10.0
-    lot: 1
-    sessions:
-      - MOSCOW_DAY
+

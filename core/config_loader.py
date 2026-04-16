@@ -295,5 +295,6 @@ _SUPPORTED_TIMEFRAMES = frozenset(
         "15min",
         "30min",
         "1hour",
+        "4hour",
     }
 )

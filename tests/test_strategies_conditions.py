@@ -2,21 +2,93 @@
 
 import unittest
 
-from core.models import MarketRegime
+from core.models import MarketRegime, MarketRegimeState
 from strategies.compression_breakout import CompressionBreakoutStrategy
 from strategies.liquidity_sweep import LiquiditySweepReversalStrategy
 from strategies.pullback_vwap_ema import TrendPullbackVWAPEMAStrategy
-from tests.helpers import build_context, build_indicator, build_trend_sequence, make_candle
+from tests.helpers import build_bear_trend_sequence, build_context, build_indicator, build_trend_sequence, make_candle
 
 
 class StrategyConditionTests(unittest.TestCase):
     def test_trend_pullback_generates_signal_in_trend(self) -> None:
-        strategy = TrendPullbackVWAPEMAStrategy(params={"impulse_atr_mult": 0.1, "volume_impulse_mult": 0.1, "pullback_location_mode": "ANY"})
+        strategy = TrendPullbackVWAPEMAStrategy(params={})
         candles = build_trend_sequence()
         indicators = build_indicator(
             timestamp=candles[-1].datetime,
             close=candles[-1].close,
             vwap=candles[-1].close - 1,
+            ema_fast=candles[-1].close + 0.2,
+            ema_slow=candles[-1].close - 0.2,
+            atr=1.0,
+            rolling_volume_avg=1000,
+        )
+        ctx = build_context(candles=candles, regime=MarketRegime.TREND, indicators=indicators)
+        signal = strategy.evaluate(ctx)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.direction.value, "LONG")
+        self.assertGreaterEqual(signal.tp1, signal.entry + 2.0 * (signal.entry - signal.stop_loss))
+
+    def test_trend_pullback_generates_short_signal_in_downtrend(self) -> None:
+        strategy = TrendPullbackVWAPEMAStrategy(params={})
+        candles = build_bear_trend_sequence()
+        indicators = build_indicator(
+            timestamp=candles[-1].datetime,
+            close=candles[-1].close,
+            vwap=candles[-1].close + 1,
+            ema_fast=candles[-1].close - 0.2,
+            ema_slow=candles[-1].close + 0.2,
+            atr=1.0,
+            rolling_volume_avg=1000,
+        )
+        ctx = build_context(candles=candles, regime=MarketRegime.TREND, indicators=indicators)
+        signal = strategy.evaluate(ctx)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertEqual(signal.direction.value, "SHORT")
+        self.assertLessEqual(signal.tp1, signal.entry - 2.0 * (signal.stop_loss - signal.entry))
+
+    def test_trend_pullback_rejects_when_pullback_never_reaches_ema_zone(self) -> None:
+        strategy = TrendPullbackVWAPEMAStrategy(params={"pullback_zone_tolerance_atr": 0.0})
+        candles = []
+        price = 100.0
+        for i in range(240):
+            if i < 236:
+                open_, close = price, price + 0.14
+            elif i < 239:
+                open_, close = price, price + 0.05
+            else:
+                open_, close = price, price + 0.45
+            candles.append(
+                make_candle(
+                    i,
+                    open_=open_,
+                    close=close,
+                    high=max(open_, close) + 0.2,
+                    low=min(open_, close) - 0.1,
+                    volume=1200,
+                )
+            )
+            price = close
+        indicators = build_indicator(
+            timestamp=candles[-1].datetime,
+            close=candles[-1].close,
+            vwap=candles[-1].close - 1,
+            ema_fast=candles[-1].close + 0.2,
+            ema_slow=candles[-1].close - 0.2,
+            atr=1.0,
+            rolling_volume_avg=1000,
+        )
+        ctx = build_context(candles=candles, regime=MarketRegime.TREND, indicators=indicators)
+        self.assertIsNone(strategy.evaluate(ctx))
+
+    def test_trend_pullback_can_run_without_vwap_or_session_timing_bias(self) -> None:
+        strategy = TrendPullbackVWAPEMAStrategy(params={})
+        candles = build_trend_sequence()
+        indicators = build_indicator(
+            timestamp=candles[-1].datetime,
+            close=candles[-1].close,
+            vwap=candles[-1].close + 5.0,
             ema_fast=candles[-1].close + 0.2,
             ema_slow=candles[-1].close - 0.2,
             atr=1.0,
@@ -125,14 +197,72 @@ class StrategyConditionTests(unittest.TestCase):
         assert signal is not None
         self.assertEqual(signal.direction.value, "SHORT")
 
-    def test_strategies_do_not_run_in_wrong_regime(self) -> None:
+    def test_trend_pullback_uses_strategy_context_score_instead_of_exact_regime(self) -> None:
         candles = build_trend_sequence()
-        indicators = build_indicator(timestamp=candles[-1].datetime)
-        ctx = build_context(candles=candles, regime=MarketRegime.NEUTRAL, indicators=indicators)
+        indicators = build_indicator(
+            timestamp=candles[-1].datetime,
+            close=candles[-1].close,
+            vwap=candles[-1].close - 1,
+            ema_fast=candles[-1].close + 0.2,
+            ema_slow=candles[-1].close - 0.2,
+            atr=1.0,
+            rolling_volume_avg=1000,
+        )
+        regime_state = MarketRegimeState(
+            dominant=MarketRegime.COMPRESSION,
+            trend_score=0.72,
+            compression_score=0.79,
+            balance_score=0.31,
+            reason_codes=("mixed_regime",),
+            details={},
+        )
+        strategy = TrendPullbackVWAPEMAStrategy(
+            params={
+                "strategy_context_score_min": 0.60,
+            }
+        )
+        ctx = build_context(
+            candles=candles,
+            regime=MarketRegime.COMPRESSION,
+            indicators=indicators,
+            regime_state=regime_state,
+        )
+        signal = strategy.evaluate(ctx)
+        self.assertIsNotNone(signal)
+        assert signal is not None
+        self.assertGreaterEqual(float(signal.metadata.get("strategy_context_score", 0.0)), 0.60)
 
-        self.assertIsNone(TrendPullbackVWAPEMAStrategy(params={}).evaluate(ctx))
-        self.assertIsNone(CompressionBreakoutStrategy(params={}).evaluate(ctx))
-        self.assertIsNone(LiquiditySweepReversalStrategy(params={}).evaluate(ctx))
+    def test_trend_pullback_blocks_when_strategy_context_score_below_threshold(self) -> None:
+        candles = build_trend_sequence()
+        indicators = build_indicator(
+            timestamp=candles[-1].datetime,
+            close=candles[-1].close,
+            vwap=candles[-1].close - 1,
+            ema_fast=candles[-1].close + 0.2,
+            ema_slow=candles[-1].close - 0.2,
+            atr=1.0,
+            rolling_volume_avg=1000,
+        )
+        regime_state = MarketRegimeState(
+            dominant=MarketRegime.NEUTRAL,
+            trend_score=0.35,
+            compression_score=0.40,
+            balance_score=0.25,
+            reason_codes=("weak_trend",),
+            details={},
+        )
+        strategy = TrendPullbackVWAPEMAStrategy(
+            params={
+                "strategy_context_score_min": 0.60,
+            }
+        )
+        ctx = build_context(
+            candles=candles,
+            regime=MarketRegime.NEUTRAL,
+            indicators=indicators,
+            regime_state=regime_state,
+        )
+        self.assertIsNone(strategy.evaluate(ctx))
 
 
 if __name__ == "__main__":

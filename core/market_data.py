@@ -485,6 +485,7 @@ def _load_tinvest_sdk() -> dict[str, Any] | None:
 
     required = [
         "AsyncClient",
+        "CandleInterval",
         "SubscriptionInterval",
         "CandleInstrument",
         "MarketDataServerSideStreamRequest",

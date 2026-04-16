@@ -8,9 +8,11 @@ from core.models import MarketRegime, SignalDirection
 from core.telegram_notifier import (
     TelegramConfig,
     TelegramNotifier,
+    _format_portfolio_event_message,
     _format_signal_message,
     _format_summary_message,
 )
+from core.portfolio_events import DomainEventType, PortfolioEvent
 from tests.helpers import build_signal
 
 
@@ -89,12 +91,47 @@ class TelegramNotifierTests(unittest.IsolatedAsyncioTestCase):
                 "ES": {"signals": 3, "closed": 2, "net_pnl": 7.0},
                 "NG": {"signals": 2, "closed": 1, "net_pnl": 3.2},
             },
+            "portfolio": {"risk_reject_reasons": {"sizing_reject": 1}},
+            "portfolio_risk_snapshot": {
+                "total_risk_pct": 1.25,
+                "total_risk_money": 1250.0,
+                "risk_by_instrument": {"ES": 0.8},
+                "risk_by_strategy": {"trend_pullback_vwap_ema": 1.25},
+                "risk_by_group": {"index": 0.8},
+            },
         }
         msg = _format_summary_message(summary, open_trades=1)
         self.assertIn("DAILY SUMMARY", msg)
         self.assertIn("Signals: 5", msg)
         self.assertIn("Open trades: 1", msg)
         self.assertIn("ES: sig=3", msg)
+        self.assertIn("Risk rejects:", msg)
+        self.assertIn("Open risk pct:", msg)
+
+    def test_position_opened_portfolio_event_includes_risk_fields(self) -> None:
+        event = PortfolioEvent(
+            kind=DomainEventType.POSITION_OPENED,
+            event_time=datetime(2026, 4, 16, 10, 0, tzinfo=timezone.utc),
+            instrument="ES",
+            strategy="trend_pullback_vwap_ema",
+            signal_id="sig-1",
+            trade_id="trade-1",
+            payload={
+                "side": "LONG",
+                "entry_fill_price": 5000.25,
+                "stop_loss": 4988.0,
+                "take_profit": 5030.0,
+                "qty": 2.0,
+                "planned_risk_money": 980.0,
+                "planned_risk_pct": 0.98,
+                "expected_rr": 2.1,
+            },
+        )
+        msg = _format_portfolio_event_message(event)
+        self.assertIn("POSITION OPENED", msg)
+        self.assertIn("Qty: 2.00000", msg)
+        self.assertIn("Planned risk:", msg)
+        self.assertIn("Expected RR:", msg)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from core.market_data import Candle
 from core.models import (
     IndicatorSnapshot,
     MarketRegime,
+    MarketRegimeState,
     SignalDirection,
     StrategyContext,
     StrategySignal,
@@ -105,6 +106,7 @@ def build_indicator(
     overlap_ratio: float = 0.65,
     swing_high: float = 101.0,
     swing_low: float = 98.0,
+    extra: dict | None = None,
 ) -> IndicatorSnapshot:
     return IndicatorSnapshot(
         timestamp=timestamp or dt_at(0),
@@ -123,7 +125,7 @@ def build_indicator(
         overlap_ratio=overlap_ratio,
         swing_high=swing_high,
         swing_low=swing_low,
-        extra={},
+        extra=dict(extra or {}),
     )
 
 
@@ -162,6 +164,7 @@ def build_context(
     session_active: bool = True,
     blackout_active: bool = False,
     params: dict | None = None,
+    regime_state: MarketRegimeState | None = None,
 ) -> StrategyContext:
     meta = instrument or build_instrument_meta(symbol=candles[-1].instrument)
     snapshot = indicators or build_indicator(timestamp=candles[-1].datetime)
@@ -175,28 +178,46 @@ def build_context(
         blackout_active=blackout_active,
         blackout_reason="test" if blackout_active else None,
         params=params or {},
+        regime_state=regime_state,
     )
 
 
 def build_trend_sequence() -> list[Candle]:
-    """Deterministic sequence that yields TREND pullback confirmation on last bar."""
+    """Deterministic bullish swing pullback confirmation with enough bars for EMA200."""
     candles: list[Candle] = []
     price = 100.0
-    for i in range(25):
-        if i < 19:
-            open_, close = price, price + 0.4
-        elif i == 19:
-            open_, close = price, price + 1.0
-        elif i == 20:
-            open_, close = price, price + 0.8
-        elif i == 21:
-            open_, close = price, price + 0.9
-        elif i == 22:
-            open_, close = price, price - 0.5
-        elif i == 23:
-            open_, close = price, price - 0.2
+    for i in range(240):
+        if i < 220:
+            open_, close = price, price + 0.12
+        elif i < 233:
+            open_, close = price, price + 0.24
+        elif i < 237:
+            open_, close = price, price - 0.45
+        elif i < 239:
+            open_, close = price, price - 0.15
         else:
-            open_, close = price, price + 0.8
+            open_, close = price, price + 0.95
+        candle = make_candle(i, open_=open_, close=close, high=max(open_, close) + 0.3, low=min(open_, close) - 0.3, volume=1200)
+        candles.append(candle)
+        price = close
+    return candles
+
+
+def build_bear_trend_sequence() -> list[Candle]:
+    """Deterministic bearish swing pullback confirmation with enough bars for EMA200."""
+    candles: list[Candle] = []
+    price = 140.0
+    for i in range(240):
+        if i < 220:
+            open_, close = price, price - 0.12
+        elif i < 233:
+            open_, close = price, price - 0.24
+        elif i < 237:
+            open_, close = price, price + 0.45
+        elif i < 239:
+            open_, close = price, price + 0.15
+        else:
+            open_, close = price, price - 0.95
         candle = make_candle(i, open_=open_, close=close, high=max(open_, close) + 0.3, low=min(open_, close) - 0.3, volume=1200)
         candles.append(candle)
         price = close

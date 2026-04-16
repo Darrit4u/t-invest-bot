@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib import error, request
 
-from core.models import StrategySignal
-from core.trade_simulator import SimulatedTrade, TradeEvent
+from core.models import StrategySignal, Trade
+from core.portfolio_events import PortfolioEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +28,11 @@ class TelegramConfig:
     summary_interval_seconds: int
     send_startup_message: bool
     send_shutdown_summary: bool
+    send_signals: bool = True
+    send_positions: bool = True
+    send_daily_report: bool = True
+    send_heartbeat: bool = True
+    send_errors: bool = True
 
     @classmethod
     def from_sources(cls, *, env: dict[str, str], params: dict[str, Any]) -> "TelegramConfig":
@@ -48,6 +53,11 @@ class TelegramConfig:
             summary_interval_seconds=max(0, int(section.get("summary_interval_seconds", 0))),
             send_startup_message=bool(section.get("send_startup_message", True)),
             send_shutdown_summary=bool(section.get("send_shutdown_summary", True)),
+            send_signals=_as_bool(section.get("send_signals", True), default=True),
+            send_positions=_as_bool(section.get("send_positions", True), default=True),
+            send_daily_report=_as_bool(section.get("send_daily_report", True), default=True),
+            send_heartbeat=_as_bool(section.get("send_heartbeat", True), default=True),
+            send_errors=_as_bool(section.get("send_errors", True), default=True),
         )
 
 
@@ -121,16 +131,29 @@ class TelegramNotifier:
             self._logger.error("Telegram queue overflow: dropping message category=%s", category)
 
     async def notify_signal(self, signal: StrategySignal) -> None:
+        if not self._config.send_signals:
+            return
         await self.notify_text(_format_signal_message(signal), category="new_signal")
 
-    async def notify_trade_event(self, event: TradeEvent, trade: SimulatedTrade | None = None) -> None:
+    async def notify_trade_event(self, event: Any, trade: Trade | None = None) -> None:
+        """Legacy adapter for low-level simulator events."""
         text = _format_trade_event_message(event, trade)
         await self.notify_text(text, category=event.event_type)
 
+    async def notify_portfolio_event(self, event: PortfolioEvent) -> None:
+        if not self._config.send_positions:
+            return
+        text = _format_portfolio_event_message(event)
+        await self.notify_text(text, category=f"portfolio_{event.event_type}")
+
     async def notify_daily_summary(self, summary: dict[str, Any], open_trades: int) -> None:
+        if not self._config.send_daily_report:
+            return
         await self.notify_text(_format_summary_message(summary, open_trades), category="daily_summary")
 
     async def notify_critical(self, title: str, details: str) -> None:
+        if not self._config.send_errors:
+            return
         await self.notify_text(_format_critical_message(title, details), category="critical")
 
     async def _worker(self) -> None:
@@ -212,6 +235,19 @@ def _post_json(url: str, payload: dict[str, Any], timeout_seconds: float) -> tup
         return 0, "", str(exc)
 
 
+def _as_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _format_signal_message(signal: StrategySignal) -> str:
     return (
         "NEW SIGNAL\n"
@@ -228,7 +264,7 @@ def _format_signal_message(signal: StrategySignal) -> str:
     )
 
 
-def _format_trade_event_message(event: TradeEvent, trade: SimulatedTrade | None) -> str:
+def _format_trade_event_message(event: Any, trade: Trade | None) -> str:
     header = {
         "new_signal": "TRADE REGISTERED",
         "activated": "TRADE ACTIVATED",
@@ -251,13 +287,14 @@ def _format_trade_event_message(event: TradeEvent, trade: SimulatedTrade | None)
     if event.price is not None:
         lines.append(f"Price: {_fmt_price(event.price)}")
 
-    if trade is not None and trade.entry_fill_price is not None:
+    if trade is not None:
+        entry_fill = trade.entry_fill_price if trade.entry_fill_price is not None else trade.entry_price
         lines.extend(
             [
-                f"Entry fill: {_fmt_price(trade.entry_fill_price)}",
-                f"Gross PnL: {_fmt_price(trade.gross_pnl)}",
-                f"Net PnL: {_fmt_price(trade.net_pnl)}",
-                f"R: {trade.r_multiple:.4f}",
+                f"Entry fill: {_fmt_price(entry_fill)}",
+                f"Gross PnL: {_fmt_price(trade.gross_pnl if trade.gross_pnl is not None else trade.pnl)}",
+                f"Net PnL: {_fmt_price(trade.pnl)}",
+                f"R: {(trade.r_multiple if trade.r_multiple is not None else 0.0):.4f}",
             ]
         )
 
@@ -269,6 +306,8 @@ def _format_trade_event_message(event: TradeEvent, trade: SimulatedTrade | None)
 
 def _format_summary_message(summary: dict[str, Any], open_trades: int) -> str:
     global_stats = summary.get("global", {})
+    portfolio_stats = summary.get("portfolio", {})
+    risk_snapshot = summary.get("portfolio_risk_snapshot", {})
     lines = [
         "DAILY SUMMARY",
         f"Signals: {int(global_stats.get('signals', 0))}",
@@ -280,6 +319,15 @@ def _format_summary_message(summary: dict[str, Any], open_trades: int) -> str:
         f"Profit factor: {float(global_stats.get('profit_factor', 0.0)):.4f}",
         f"Drawdown: {_fmt_price(float(global_stats.get('max_drawdown', 0.0)))}",
     ]
+    risk_reject_reasons = portfolio_stats.get("risk_reject_reasons", {})
+    if isinstance(risk_reject_reasons, dict) and risk_reject_reasons:
+        lines.append(f"Risk rejects: {risk_reject_reasons}")
+    if isinstance(risk_snapshot, dict) and risk_snapshot:
+        lines.append(f"Open risk pct: {float(risk_snapshot.get('total_risk_pct', 0.0)):.4f}")
+        lines.append(f"Open risk money: {_fmt_price(float(risk_snapshot.get('total_risk_money', 0.0)))}")
+        lines.append(f"Risk by instrument: {risk_snapshot.get('risk_by_instrument', {})}")
+        lines.append(f"Risk by strategy: {risk_snapshot.get('risk_by_strategy', {})}")
+        lines.append(f"Risk by group: {risk_snapshot.get('risk_by_group', {})}")
 
     by_instrument = summary.get("by_instrument", {})
     if by_instrument:
@@ -292,6 +340,93 @@ def _format_summary_message(summary: dict[str, Any], open_trades: int) -> str:
     return "\n".join(lines)
 
 
+def _format_portfolio_event_message(event: PortfolioEvent) -> str:
+    if event.event_type == "position_opened":
+        return _format_position_opened_message(event)
+    if event.event_type in {"risk_rejected", "allocation_rejected", "signal_rejected"}:
+        return _format_rejection_message(event)
+
+    lines = [
+        "PORTFOLIO EVENT",
+        f"Type: {event.kind.value}",
+        f"Time: {event.event_time.isoformat()}",
+    ]
+    if event.instrument:
+        lines.append(f"Instrument: {event.instrument}")
+    if event.strategy:
+        lines.append(f"Strategy: {event.strategy}")
+    if event.signal_id:
+        lines.append(f"Signal: {event.signal_id}")
+    if event.trade_id:
+        lines.append(f"Trade: {event.trade_id}")
+    if event.reason:
+        lines.append(f"Reason: {event.reason}")
+    if event.payload:
+        lines.append(f"Details: {event.payload}")
+    return "\n".join(lines)
+
+
+def _format_position_opened_message(event: PortfolioEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    qty = _fmt_optional_float(payload.get("qty"))
+    entry = _fmt_optional_float(payload.get("entry_fill_price"), fallback=payload.get("entry_price"))
+    stop = _fmt_optional_float(payload.get("stop_loss"))
+    take = _fmt_optional_float(payload.get("take_profit"))
+    planned_risk_money = _fmt_optional_float(payload.get("planned_risk_money"))
+    planned_risk_pct = _fmt_optional_pct(payload.get("planned_risk_pct"))
+    expected_rr = _fmt_optional_ratio(payload.get("expected_rr"))
+
+    lines = [
+        "POSITION OPENED",
+        f"Time: {event.event_time.isoformat()}",
+        f"Instrument: {event.instrument or '-'}",
+        f"Strategy: {event.strategy or '-'}",
+    ]
+    side = str(payload.get("side", "")).strip()
+    if side:
+        lines.append(f"Side: {side}")
+    if entry is not None:
+        lines.append(f"Entry: {entry}")
+    if stop is not None:
+        lines.append(f"Stop: {stop}")
+    if take is not None:
+        lines.append(f"Take: {take}")
+    if qty is not None:
+        lines.append(f"Qty: {qty}")
+    if planned_risk_money is not None:
+        lines.append(f"Planned risk: {planned_risk_money}")
+    if planned_risk_pct is not None:
+        lines.append(f"Planned risk %: {planned_risk_pct}")
+    if expected_rr is not None:
+        lines.append(f"Expected RR: {expected_rr}")
+    if event.trade_id:
+        lines.append(f"Trade: {event.trade_id}")
+    if event.signal_id:
+        lines.append(f"Signal: {event.signal_id}")
+    return "\n".join(lines)
+
+
+def _format_rejection_message(event: PortfolioEvent) -> str:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    lines = [
+        "SIGNAL REJECTED",
+        f"Type: {event.event_type}",
+        f"Time: {event.event_time.isoformat()}",
+        f"Instrument: {event.instrument or '-'}",
+        f"Strategy: {event.strategy or '-'}",
+        f"Reason: {event.reason or 'unknown'}",
+    ]
+    sizing_reason = payload.get("sizing_reject_reason")
+    if sizing_reason:
+        lines.append(f"Sizing reject: {sizing_reason}")
+    category = payload.get("rejection_category")
+    if category:
+        lines.append(f"Category: {category}")
+    if payload:
+        lines.append(f"Details: {payload}")
+    return "\n".join(lines)
+
+
 def _format_critical_message(title: str, details: str) -> str:
     now = datetime.now(tz=timezone.utc).isoformat()
     return f"CRITICAL ALERT\nTitle: {title}\nTime: {now}\nDetails: {details}"
@@ -299,3 +434,28 @@ def _format_critical_message(title: str, details: str) -> str:
 
 def _fmt_price(value: float) -> str:
     return f"{value:.5f}"
+
+
+def _fmt_optional_float(value: Any, *, fallback: Any = None) -> str | None:
+    raw = value if value is not None else fallback
+    try:
+        numeric = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return f"{numeric:.5f}"
+
+
+def _fmt_optional_pct(value: Any) -> str | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"{numeric:.4f}%"
+
+
+def _fmt_optional_ratio(value: Any) -> str | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return f"{numeric:.3f}"

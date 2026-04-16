@@ -108,6 +108,26 @@ class SessionNewsRegimeTests(unittest.TestCase):
         )
         self.assertEqual(clf.classify(neutral), MarketRegime.NEUTRAL)
 
+    def test_regime_classifier_returns_score_state_with_reason_codes(self) -> None:
+        clf = MarketRegimeClassifier.from_params({})
+        snapshot = build_indicator(
+            close=101,
+            vwap=100,
+            ema_fast=101.4,
+            ema_slow=100.8,
+            atr=1.0,
+            vwap_slope=0.06,
+            ema_distance=0.5,
+            crossing_count=1,
+            range_width=2.4,
+            overlap_ratio=0.4,
+        )
+        state = clf.classify_state(snapshot)
+
+        self.assertEqual(state.dominant, MarketRegime.TREND)
+        self.assertGreater(state.trend_score, 0.7)
+        self.assertIn("trend_alignment_ok", state.reason_codes)
+
 
 if __name__ == "__main__":
     unittest.main()
