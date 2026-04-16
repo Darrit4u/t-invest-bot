@@ -15,7 +15,13 @@ class LiquiditySweepReversalStrategy(BaseStrategy):
     name = "liquidity_sweep_reversal"
     allowed_regime = MarketRegime.BALANCE
 
-    def evaluate(self, context: StrategyContext) -> StrategySignal | None:
+    def generate_signals(self, context: StrategyContext) -> list[StrategySignal]:
+        signal = self._evaluate_one(context)
+        if signal is None:
+            return []
+        return [signal]
+
+    def _evaluate_one(self, context: StrategyContext) -> StrategySignal | None:
         context_score = _strategy_context_score(
             context=context,
             strategy_name=self.name,

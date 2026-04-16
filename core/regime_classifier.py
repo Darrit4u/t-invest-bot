@@ -110,8 +110,13 @@ class MarketRegimeClassifier:
         ema_distance_atr: float,
         vwap_slope_atr: float,
     ) -> tuple[float, list[str]]:
-        long_bias = snapshot.close > snapshot.vwap and snapshot.ema_fast > snapshot.ema_slow
-        short_bias = snapshot.close < snapshot.vwap and snapshot.ema_fast < snapshot.ema_slow
+        ema_trend = _safe_float(snapshot.extra.get("ema_trend"))
+        if ema_trend is not None:
+            long_bias = snapshot.close > ema_trend and snapshot.ema_slow > ema_trend and snapshot.ema_fast > snapshot.ema_slow
+            short_bias = snapshot.close < ema_trend and snapshot.ema_slow < ema_trend and snapshot.ema_fast < snapshot.ema_slow
+        else:
+            long_bias = snapshot.close > snapshot.vwap and snapshot.ema_fast > snapshot.ema_slow
+            short_bias = snapshot.close < snapshot.vwap and snapshot.ema_fast < snapshot.ema_slow
         directional_alignment = 1.0 if (long_bias or short_bias) else 0.0
         slope_strength = _clamp01(
             abs(vwap_slope_atr) / max(self._config.trend_vwap_slope_atr, 1e-9)
@@ -242,6 +247,13 @@ class MarketRegimeClassifier:
 
 def _safe_div(numerator: float, denominator: float) -> float:
     return float(numerator) / float(denominator) if denominator else 0.0
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _clamp01(value: float) -> float:

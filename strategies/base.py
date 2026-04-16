@@ -20,8 +20,20 @@ class BaseStrategy(ABC):
         self.params = params or {}
 
     @abstractmethod
+    def generate_signals(self, context: StrategyContext) -> list[StrategySignal]:
+        """Return zero or more domain signals for the given context."""
+
+    @property
+    def strategy_id(self) -> str:
+        """Stable strategy identifier for domain-level routing."""
+        return self.name
+
     def evaluate(self, context: StrategyContext) -> StrategySignal | None:
-        """Return a signal or None when setup is invalid."""
+        """Backward-compatible single-signal accessor for legacy call sites."""
+        signals = self.generate_signals(context)
+        if not signals:
+            return None
+        return signals[0]
 
     def _float(self, key: str, default: float) -> float:
         return float(self.params.get(key, default))

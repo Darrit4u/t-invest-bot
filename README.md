@@ -1,501 +1,305 @@
-# T-Invest Bot (Intraday Futures Signal Engine)
+# 1. Что это за проект
 
-Проект для paper-trading (без реальной отправки ордеров): получает свечи, классифицирует рыночный режим, генерирует сигналы по стратегиям, симулирует сделки, считает статистику и отправляет уведомления в Telegram.
+Это система для алгоритмической **swing-торговли**.  
+Простыми словами: программа сама смотрит рынок, ищет торговые сигналы, считает риск и ведет сделки в режиме симуляции.
 
-## Что реализовано
+Важно:
+- Система **не гарантирует прибыль**.
+- Система создана в первую очередь для:
+- `paper trading` (торговля без реальных денег).
+- тестирования и улучшения стратегий.
 
-- Поток свечей в `demo` или `t_invest` режиме.
-- 3 стратегии: `trend_pullback_vwap_ema`, `compression_breakout`, `liquidity_sweep_reversal`.
-- Классификация режимов: `TREND`, `COMPRESSION`, `BALANCE`, `NEUTRAL`.
-- Централизованный фильтр сигналов (сессии, blackout, RR, комиссии).
-- Симулятор жизненного цикла сделок: активация, TP1/TP2/SL, экспирация, отмена по news/session.
-- Хранение сигналов/сделок/событий/снимков статистики в SQLite.
-- Логи приложения и Telegram.
-- Автотесты (unit + integration + replay + edge cases).
+# 2. Как система зарабатывает
 
-## Структура проекта
+Система использует 3 типа стратегий:
+- `Trend Pullback`
+- `Breakout`
+- `Mean Reversion` (ограниченно)
+
+Что это значит по-человечески:
+- `Trend Pullback`: ищет устойчивое движение цены (тренд), ждет откат и пытается войти по направлению тренда.
+- `Breakout`: ждет, когда цена долго стоит в диапазоне, и входит при сильном выходе из диапазона.
+- `Mean Reversion`: ищет редкие моменты, когда цена сильно “переразогнана”, и делает ставку на возврат к более нормальному уровню.
+
+Идея не в “угадать каждую сделку”, а в том, чтобы серия сделок в сумме имела положительный результат при строгом контроле риска.
+
+# 3. Какие инструменты используются
+
+Целевая группа инструментов:
+- `Si`
+- `BR`
+- `Gold`
+- `Silver`
+- `S&P500`
+
+Зачем разные инструменты:
+- чтобы не зависеть от одного рынка;
+- чтобы снизить риск, когда один инструмент временно работает плохо.
+
+Это называется **диверсификация**: не складывать все в одну идею.
+
+Примечание: в текущем рабочем конфиге проекта уже включены аналоги `BR`, `Silver`, `S&P500` (символы `BRENT`, `SILVER`, `ES`). Остальные добавляются через `config/instruments.yaml`.
+
+# 4. Как работает система (очень просто)
 
 ```text
-config/
-core/
-storage/
-strategies/
-tests/
-main.py
+данные рынка
+→ стратегии ищут сигналы
+→ фильтр проверяет
+→ портфель решает, брать или нет
+→ рассчитывается риск и размер позиции
+→ сигнал отправляется
 ```
 
-## Требования
+# 5. Риск (очень важно)
 
-- Python 3.10+
-- pip
+В системе риск ограничивается заранее:
+- на одну сделку обычно около `0.5%–1%` капитала;
+- есть лимит на суммарный риск по всем открытым позициям;
+- есть лимиты по инструментам и группам похожих инструментов.
 
-## Установка и запуск (полная инструкция)
+Убыточные сделки будут. Это нормально для любой реальной торговой системы.  
+Система может терять деньги на серии сделок, особенно в “ломающемся” рынке.
 
-1. Перейдите в папку проекта:
+# 6. Что такое paper trading
 
-```powershell
+`Paper trading` — это симуляция реальной торговли:
+- сделки открываются и закрываются как в реальности;
+- считаются комиссии, проскальзывания и результаты;
+- реальные деньги не используются.
+
+Это обязательный этап перед любыми попытками реальной торговли.
+
+# 7. Как запустить (пошагово)
+
+### Шаг 1. Установить зависимости
+
+```bash
 cd t-invest-bot
-```
-
-2. Создайте и активируйте виртуальное окружение:
-
-```bash
 python -m venv venv
-.\venv\Scripts\Activate.bat  #cmd.exe
-or
-source ./venv/bin/activate  # *unix
-```
-
-3. Установите зависимости:
-
-```bash
+# Windows PowerShell:
+.\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-4. (Опционально, только для `t_invest` режима) установите SDK T-Invest:
+### Шаг 2. Подготовить конфиг и `.env`
 
 ```bash
-pip install t-tech-investments --index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+# если папка config пустая или вы хотите восстановить шаблоны:
+copy .\config\example\* .\config\ /E /Y
+
+# создать .env из шаблона:
+copy .env.example .env
 ```
 
-5. Создайте `.env` на основе `.env.example` и заполните токены:
+В `.env` обычно заполняют:
+- `INVEST_TOKEN` (если используете T-Invest данные);
+- `TELEGRAM_BOT_TOKEN` и `TELEGRAM_CHAT_ID` (если нужны уведомления).
 
+### Шаг 3. Запустить runtime
+
+Основной режим paper trading:
 ```bash
-cp .env.example .env
+python run_server_paper.py --config-dir .\config --log-dir .\logs
 ```
 
-6. Скопировать YAML-конфиги в `config/`.
-
+Быстрый тест на несколько минут:
 ```bash
-cp config/example/* config/
+python run_server_paper.py --config-dir .\config --run-seconds 300
 ```
 
-7. Запустите приложение:
-
-```powershell
-python main.py
+Проверка конфигов без запуска:
+```bash
+python run_server_paper.py --check-config
 ```
 
-8. Для тестового прогона на ограниченное время:
+# 8. Конфиг (ОЧЕНЬ ВАЖНЫЙ РАЗДЕЛ)
 
-```powershell
-python main.py --run-seconds 60
-```
+Проект читает несколько YAML-файлов в папке `config`:
+- `params.yaml` — основные параметры работы;
+- `instruments.yaml` — список и свойства инструментов;
+- `strategies.yaml` — какие стратегии разрешены для каждого инструмента.
 
-## Утилита автозаполнения `instruments.yaml`
+## Основные блоки
 
-Скрипт `scripts/fill_instruments_meta.py` автоматически обновляет поля:
-- `figi`
-- `uid`
-- `tick_size`
-- `tick_value`
+### 1. runtime
+- отвечает за режим длительного paper-runtime (heartbeat, ежедневный отчет и т.д.).
 
-Источник данных: SDK `t_tech.invest` (`client.instruments.futures(...)` + `min_price_increment` / `min_price_increment_amount`).
+### 2. instruments
+- определяет, какими инструментами система вообще может торговать.
 
-### Что нужно перед запуском
+### 3. strategies
+- определяет, какие стратегии включены для каждого инструмента.
 
-- В `config/instruments.yaml` должны быть заполнены `ticker` и `class_code`.
-- В `.env` должен быть валидный `INVEST_TOKEN` (или передайте `--token`).
+### 4. risk
+- в текущем проекте риск находится в блоке `portfolio`.
+- там задается риск на сделку.
+- там задаются лимиты по общему риску портфеля.
+- там задаются лимиты по инструментам и корреляционным группам.
 
-### Dry run (без записи файла)
+### 5. telegram
+- включает/выключает уведомления и типы сообщений.
 
-```powershell
-python scripts/fill_instruments_meta.py --dry-run
-```
+## Пример конфига
 
-### Обычный запуск (с записью в `config/instruments.yaml`)
-
-```powershell
-python scripts/fill_instruments_meta.py
-```
-
-### Полезные параметры
-
-```powershell
-python scripts/fill_instruments_meta.py --help
-```
-
-Параметры:
-- `--config` путь к `instruments.yaml` (по умолчанию `config/instruments.yaml`)
-- `--env-file` путь к `.env` (по умолчанию `.env`)
-- `--token` токен напрямую (приоритет выше `.env`)
-- `--dry-run` только показать изменения, без записи
-
-Примечание: для фьючерсов `tick_value` (`min_price_increment_amount`) может меняться в течение дня.
-
-## Матричный бэктест стратегий (T-Invest)
-
-Отдельный модуль запускается через:
-
-```powershell
-python scripts/backtest_tinvest.py
-```
-
-Что делает модуль:
-- загружает исторические свечи строго из `t_invest` API;
-- прогоняет матрицу `профиль × стратегия × инструмент`;
-- для каждой тройки ведет последовательный поиск сделок: после закрытия текущей ищет следующий вход;
-- считает статистику и сохраняет артефакты отчета.
-
-Ключевые аргументы:
-
-```powershell
-python scripts/backtest_tinvest.py `
-  --start 2026-01-05 `
-  --end 2026-04-10 `
-  --timeframe 5min `
-  --profiles conservative,balanced,active `
-  --strategies trend_pullback_vwap_ema,compression_breakout,liquidity_sweep_reversal `
-  --workers 6
-```
-
-Результаты сохраняются в папку `backtest_reports/matrix_backtest_<timestamp>/`:
-- `summary_ru.txt` — итоговая сводка на русском;
-- `combo_summary.csv` — метрики по каждой тройке;
-- `signals.csv`, `trades.csv`, `events.csv` — детальные данные;
-- `summary.json` — машинно-читаемая сводка.
-
-## Режимы работы
-
-- `demo` (по умолчанию): синтетические свечи, токен T-Invest не нужен.
-- `t_invest`: реальные свечи через API T-Invest.
-
-Для `t_invest` обязательно:
-- задать `INVEST_TOKEN` в `.env`;
-- выставить `MARKET_DATA_MODE=t_invest` в `.env` или `config/params.yaml`;
-- заполнить `figi` для инструментов в `config/instruments.yaml` (без `figi` инструмент пропускается в live-подписке).
-
-## Переменные окружения (`.env`)
-
-Файлы подхватываются в порядке:
-1. `.env`
-2. `.env.example` (только если ключ отсутствует в `.env`)
-
-| Переменная | Обязательность | Значение по умолчанию | За что отвечает |
-|---|---|---|---|
-| `INVEST_TOKEN` | Да для `t_invest`, нет для `demo` | `""` | Токен доступа к T-Invest API для live-потока свечей |
-| `TELEGRAM_BOT_TOKEN` | Нужен при `telegram.enabled=true` | `""` | Токен Telegram-бота |
-| `TELEGRAM_CHAT_ID` | Нужен при `telegram.enabled=true` | `""` | ID чата/канала для отправки сообщений |
-| `DB_PATH` | Нет | из `params.yaml -> storage.db_path` (`signals.db`) | Путь к SQLite файлу БД |
-| `MARKET_DATA_MODE` | Нет | из `params.yaml -> market_data.mode` (`demo`) | Принудительный выбор режима `demo`/`t_invest` |
-| `CHECK_EVERY_SECONDS` | Нет | `60` в `.env.example` | Сейчас в коде не используется (зарезервировано) |
-
-## CLI-аргументы `main.py`
-
-| Аргумент | По умолчанию | За что отвечает |
-|---|---|---|
-| `--config-dir` | `./config` | Папка с YAML-конфигами |
-| `--log-dir` | `./logs` | Папка для логов |
-| `--run-seconds` | `0` | Автоостановка через N секунд (`0` = бесконечный режим) |
-| `--print-every` | `10` | Частота технических snapshot-логов (каждые N обновлений свечей) |
-
-## Конфигурация `config/instruments.yaml`
-
-### Глобальные поля
-
-| Ключ | За что отвечает |
-|---|---|
-| `history_depth` | Глубина хранения свечей в памяти на поток `(instrument, timeframe)` |
-| `default_timeframe` | Таймфрейм, с которым работает ingest/signal pipeline |
-
-### `session_rules`
-
-| Ключ | За что отвечает |
-|---|---|
-| `timezone` | Таймзона сессии |
-| `start` | Начало сессии (`HH:MM` или `HH:MM:SS`) |
-| `end` | Конец сессии (`HH:MM` или `HH:MM:SS`) |
-
-Поддерживаются overnight-сессии (например, `23:00`-`02:00`).
-
-### `instruments.<SYMBOL>`
-
-| Ключ | За что отвечает |
-|---|---|
-| `enabled` | Включение/выключение инструмента |
-| `ticker` | Биржевой тикер |
-| `class_code` | Код класса инструмента |
-| `uid` | Идентификатор инструмента (опционально) |
-| `figi` | FIGI для live-подписки на свечи |
-| `tick_size` | Шаг цены |
-| `tick_value` | Стоимость тика |
-| `lot` | Размер лота/контракта |
-| `sessions` | Список имен сессий из `session_rules`, в которых можно торговать |
-
-## Конфигурация `config/strategies.yaml`
-
-| Ключ | За что отвечает |
-|---|---|
-| `strategies.<SYMBOL>` | Список разрешенных стратегий для инструмента |
-
-Доступные имена:
-- `trend_pullback_vwap_ema`
-- `compression_breakout`
-- `liquidity_sweep_reversal`
-
-## Конфигурация `config/params.yaml`
-
-### Профили A/B
-
-Готовые профили лежат в:
-- `config/profiles/params.conservative.yaml`
-- `config/profiles/params.balanced.yaml`
-- `config/profiles/params.active.yaml`
-- `config/profiles/params.shadow.yaml` (R&D: `ES+trend`, `BRENT+compression`)
-
-Дубликаты для шаблонов/репозитория:
-- `config/example/profiles/params.conservative.yaml`
-- `config/example/profiles/params.balanced.yaml`
-- `config/example/profiles/params.active.yaml`
-- `config/example/profiles/params.shadow.yaml`
-
-Быстро переключить активный профиль локально:
-
-```powershell
-Copy-Item .\config\profiles\params.balanced.yaml .\config\params.yaml -Force
-```
-
-Замените `balanced` на `conservative`, `active` или `shadow`.
-
-### Общие настройки
-
-| Ключ | За что отвечает |
-|---|---|
-| `timezone` | Базовая таймзона приложения и `news_blackout` |
-| `news_blackout_file` | Имя файла blackout-окон внутри `config/` |
-| `max_eval_candles` | Максимум последних свечей для оценки сигналов |
-
-### `market_data`
-
-| Ключ | За что отвечает |
-|---|---|
-| `mode` | `demo` или `t_invest` |
-| `reconnect_delay_seconds` | Задержка между попытками переподключения live-потока |
-| `candle_interval_seconds` | Интервал генерации demo-свечей |
-| `base_prices.<SYMBOL>` | Базовая цена для demo-генератора по инструментам |
-
-### `history_preload`
-
-| Ключ | За что отвечает |
-|---|---|
-| `enabled` | Включить предзагрузку истории свечей перед запуском live-стрима |
-| `bars` | Явно задать целевую глубину предзагрузки (0 = вычислять автоматически) |
-| `extra_bars` | Запас баров поверх расчетного минимума |
-| `request_limit_multiplier` | Множитель лимита запроса к API для надежного добора данных |
-
-### `storage`
-
-| Ключ | За что отвечает |
-|---|---|
-| `db_path` | Путь к SQLite БД (если `DB_PATH` не задан в `.env`) |
-
-### `indicator_engine`
-
-| Ключ | За что отвечает |
-|---|---|
-| `ema_fast` | Период быстрой EMA |
-| `ema_slow` | Период медленной EMA |
-| `atr_period` | Период ATR |
-| `volume_period` | Окно средней volume |
-| `slope_period` | Окно расчета slope для EMA/VWAP |
-| `crossing_lookback` | Окно подсчета crossing (для режимов) |
-| `overlap_window` | Окно overlap-метрики |
-| `swing_window` | Окно swing high/low |
-
-### `regime_classifier`
-
-| Ключ | За что отвечает |
-|---|---|
-| `trend_ema_distance_atr` | Мин. дистанция EMA в ATR для `TREND` |
-| `trend_vwap_slope_atr` | Мин. slope VWAP в ATR для `TREND` |
-| `trend_crossing_max` | Макс. crossings для `TREND` |
-| `compression_range_min_atr` | Нижняя граница range/ATR для `COMPRESSION` |
-| `compression_range_max_atr` | Верхняя граница range/ATR для `COMPRESSION` |
-| `compression_ema_distance_atr` | Макс. дистанция EMA в ATR для `COMPRESSION` |
-| `compression_vwap_slope_abs_atr` | Макс. abs(slope VWAP) в ATR для `COMPRESSION` |
-| `compression_overlap_min` | Мин. overlap ratio для `COMPRESSION` |
-| `balance_crossing_min` | Мин. crossings для `BALANCE` |
-| `balance_ema_distance_atr` | Макс. дистанция EMA в ATR для `BALANCE` |
-| `balance_vwap_slope_abs_atr` | Макс. abs(slope VWAP) в ATR для `BALANCE` |
-
-### `signal_filter`
-
-| Ключ | За что отвечает |
-|---|---|
-| `commission_roundtrip` | Комиссия round-trip для проверки окупаемости TP1 |
-| `safety_multiplier` | Запас по ожидаемой прибыли относительно комиссии |
-
-### `trade_simulator`
-
-| Ключ | За что отвечает |
-|---|---|
-| `commission_per_side` | Комиссия на вход/выход |
-| `tp1_size` | Доля позиции, закрываемая на TP1 (0..1) |
-| `max_wait_bars` | Лимит баров ожидания активации сигнала |
-| `max_trade_bars` | Лимит баров жизни активной сделки |
-| `move_stop_to_breakeven` | Перенос стопа в безубыток после TP1 |
-| `close_active_on_blackout` | Закрывать ли активные сделки при старте blackout |
-| `close_profitable_on_session_end` | На конце сессии закрывать только сделки с плавающей прибылью (убыточные можно переносить) |
-| `intrabar_stop_priority` | При касании и TP, и SL внутри одной свечи приоритет у SL |
-
-### `telegram`
-
-| Ключ | За что отвечает |
-|---|---|
-| `enabled` | Включение Telegram-нотификатора |
-| `retry_attempts` | Число попыток отправки одного сообщения |
-| `retry_delay_seconds` | Базовая задержка между повторами |
-| `request_timeout_seconds` | HTTP timeout при отправке сообщения |
-| `queue_maxsize` | Размер внутренней очереди сообщений |
-| `summary_interval_seconds` | Интервал авто-сводок (`0` = выключено) |
-| `send_startup_message` | Отправлять сообщение о старте |
-| `send_shutdown_summary` | Отправлять итоговую сводку при остановке |
-
-### `strategy_params` (глобально + по паре инструмент/стратегия)
-
-Поддерживаются две структуры:
-
-1) Legacy (обратная совместимость):
+Ниже рабочий минимальный пример для `config/params.yaml`:
 
 ```yaml
-strategy_params:
-  trend_pullback_vwap_ema:
-    tp1_r: 1.0
-    tp2_r: 2.2
+timezone: Europe/Moscow
+
+trading:
+  mode: swing                    # главный режим: swing
+  enforce_session_filter: false  # в swing обычно не режем сигналы по сессии
+
+timeframes:
+  primary: 1hour                 # основной таймфрейм
+  trend: 4hour                   # трендовый контекст
+
+runtime:
+  mode: server_paper
+  polling_interval_sec: 30
+  daily_report_enabled: true
+  daily_report_time: "23:10"
+
+portfolio:
+  enabled: true
+  account_size: 100000
+  max_positions: 4
+  max_risk_per_trade_pct: 1.0
+  max_total_risk_pct: 4.0
+  max_instrument_risk_pct: 2.0
+  max_strategy_risk_pct: 3.0
+  max_positions_per_correlation_group: 1
+  correlation_groups:
+    metals: [SILVER]
+    energy: [BRENT]
+    indices: [ES]
+
+telegram:
+  enabled: true
+  send_signals: true
+  send_positions: true
+  send_daily_report: true
 ```
 
-2) Рекомендуемая (пер-пара `instrument + strategy`):
-
+`config/instruments.yaml` (пример):
 ```yaml
-strategy_params:
-  by_instrument:
-    SILVER:
-      trend_pullback_vwap_ema:
-        enabled: true
-        tp1_r: 1.2
-        tp2_r: 2.4
+instruments:
+  ES:
+    enabled: true
+    tick_size: 0.01
+    tick_value: 0.78304
+    lot: 1
 ```
 
-Дополнительно можно использовать `defaults` для общих значений и алиас `instruments` вместо `by_instrument`.
-Приоритет применения: `defaults` -> `by_instrument.<instrument>`.
-
-Минимальный набор, который держим в YAML:
-- `trend_pullback_vwap_ema`: `enabled`, `blocked_entry_hours_local`, `tp1_r`, `tp2_r`, `confirmation_close_delta_atr`, `use_mtf_filter`, `trend_timeframe`, `setup_timeframe`.
-- `compression_breakout`: `enabled`, `range_min_atr`, `range_max_atr`, `breakout_body_min_atr`, `breakout_volume_mult`, `tp1_r`, `tp2_r`.
-- `liquidity_sweep_reversal`: `enabled`, `balance_crosses_vwap_min`, `day_range_max_atr`, `sweep_min_atr` (или `sweep_min_ticks`), `return_close_distance_atr`, `tp1_r`, `tp2_r`, `use_mtf_filter`.
-
-Остальные «тонкие» параметры удалены из YAML и оставлены как дефолты в коде.
-
-### `strategy_params.trend_pullback_vwap_ema`
-
-| Ключ | За что отвечает |
-|---|---|
-| `impulse_bars` | Кол-во свечей для оценки импульса |
-| `impulse_atr_mult` | Мин. размер импульса в ATR |
-| `min_bullish_bars_in_impulse` | Мин. bullish-свечей для long-импульса |
-| `min_bearish_bars_in_impulse` | Мин. bearish-свечей для short-импульса |
-| `volume_impulse_mult` | Мин. отношение объема импульса к среднему |
-| `min_vwap_extension_atr` | Мин. удаление от VWAP в ATR |
-| `max_vwap_extension_atr` | Макс. удаление от VWAP в ATR |
-| `pullback_min_atr` | Мин. глубина pullback в ATR |
-| `pullback_max_atr` | Макс. глубина pullback в ATR |
-| `pullback_location_mode` | Тип зоны pullback (`ANY`, и др.) |
-| `confirmation_body_min_atr` | Мин. размер тела confirm-свечи в ATR |
-| `use_mtf_filter` | Включить MTF-фильтр (тренд + setup) |
-| `trend_timeframe` / `setup_timeframe` | Старшие ТФ для фильтра (например, `1hour` и `15min`) |
-| `mtf_fast_ema` / `mtf_slow_ema` / `mtf_slope_bars` | Параметры EMA и slope в MTF-фильтре |
-| `stop_buffer_atr` | Буфер SL в ATR |
-| `tp1_r` | TP1 в R |
-| `tp2_r` | TP2 в R |
-| `entry_timing_mode` | Режим входа (`NEXT_BAR_OPEN`, `CONFIRMATION_CLOSE`) |
-
-### `strategy_params.compression_breakout`
-
-| Ключ | За что отвечает |
-|---|---|
-| `compression_window_bars` | Окно поиска компрессии |
-| `range_max_atr` | Макс. ширина диапазона в ATR |
-| `range_min_atr` | Мин. ширина диапазона в ATR |
-| `ema_distance_max_atr` | Макс. дистанция EMA в ATR |
-| `vwap_slope_abs_max_atr` | Макс. abs slope VWAP в ATR |
-| `overlap_ratio_min` | Мин. overlap ratio |
-| `volume_floor_mult` | Мин. baseline объема |
-| `breakout_body_min_atr` | Мин. размер тела breakout-свечи в ATR |
-| `breakout_volume_mult` | Мин. volume для подтверждения breakout |
-| `late_breakout_extension_atr` | Макс. «опоздавшее» расширение в ATR |
-| `large_breakout_retest_threshold_atr` | Порог «слишком большого» breakout для retest |
-| `stop_atr` | Компонента стопа от ATR |
-| `stop_range_factor` | Компонента стопа от ширины диапазона |
-| `tp1_r` | TP1 в R |
-| `tp2_r` | TP2 в R |
-| `max_retest_bars` | Лимит баров на ретест |
-| `retest_tolerance_atr` | Допуск ретеста в ATR |
-| `use_mtf_filter` + `trend_timeframe`/`setup_timeframe` | MTF-фильтр направления для breakout |
-| `mtf_fast_ema` / `mtf_slow_ema` / `mtf_slope_bars` | Параметры EMA/slope для MTF-фильтра |
-
-### `strategy_params.liquidity_sweep_reversal`
-
-| Ключ | За что отвечает |
-|---|---|
-| `reference_lookback_bars` | Окно поиска reference-уровней |
-| `balance_crosses_vwap_min` | Мин. пересечений VWAP для balance-фильтра |
-| `ema_distance_max_atr` | Макс. дистанция EMA в ATR |
-| `vwap_slope_abs_max_atr` | Макс. abs slope VWAP в ATR |
-| `day_range_max_atr` | Макс. размер day range в ATR |
-| `impulse_block_atr` | Блокировка при слишком сильном импульсе |
-| `sweep_min_atr` | Мин. sweep в ATR |
-| `sweep_max_atr` | Макс. sweep в ATR |
-| `wick_min_share` | Мин. доля хвоста sweep-свечи |
-| `sweep_volume_mult` | Мин. объем sweep-свечи |
-| `return_close_distance_atr` | Допуск close при возврате в диапазон |
-| `stop_buffer_atr` | Буфер стопа в ATR |
-| `tp1_r` | TP1 в R |
-| `tp2_r` | TP2 в R |
-| `entry_mode` | Режим входа (`NEXT_BAR_OPEN`, `CONFIRMATION_CLOSE` и т.д.) |
-| `use_mtf_filter` + `trend_timeframe`/`setup_timeframe` | MTF-фильтр направления для sweep-reversal |
-| `mtf_fast_ema` / `mtf_slow_ema` / `mtf_slope_bars` | Параметры EMA/slope для MTF-фильтра |
-
-## Конфигурация `config/news_blackout.yaml`
-
-Файл содержит список интервалов, внутри которых новые сигналы блокируются:
-
+`config/strategies.yaml` (пример):
 ```yaml
-- start: "2026-04-10 15:25"
-  end: "2026-04-10 15:40"
-  description: "CPI release"
+strategies:
+  ES:
+    - trend_pullback_vwap_ema
+    - compression_breakout
 ```
 
-Форматы времени: `YYYY-MM-DD HH:MM` или `YYYY-MM-DD HH:MM:SS`.  
-Границы интервала включительные (`start <= now <= end`).
+## Что означает каждое поле простыми словами
 
-## Логи и данные
+`trading.mode`: какой торговый стиль включен (`swing` или `intraday`).  
+`timeframes.primary`: на каком таймфрейме система ищет основные входы.  
+`timeframes.trend`: старший таймфрейм для фильтра тренда.  
+`runtime.mode`: тип запуска (для сервера обычно `server_paper`).  
+`runtime.polling_interval_sec`: как часто runtime делает служебные проверки.  
+`runtime.daily_report_enabled`: включить ежедневный отчет.  
+`runtime.daily_report_time`: время отчета.
 
-Логи пишутся в папку `logs/`:
-- `application.log`
-- `errors.log`
-- `telegram.log`
+`portfolio.enabled`: включить портфельную логику и риск-контроль.  
+`portfolio.account_size`: базовый размер капитала для расчетов риска.  
+`portfolio.max_positions`: максимум открытых позиций одновременно.  
+`portfolio.max_risk_per_trade_pct`: максимум риска на одну сделку, в процентах.  
+`portfolio.max_total_risk_pct`: максимум суммарного риска по всем открытым сделкам.  
+`portfolio.max_instrument_risk_pct`: лимит риска на один инструмент.  
+`portfolio.max_strategy_risk_pct`: лимит риска на одну стратегию.  
+`portfolio.max_positions_per_correlation_group`: ограничение концентрации в одной группе похожих рынков.  
+`portfolio.correlation_groups`: какие инструменты считаются похожими между собой.
 
-SQLite (по умолчанию `signals.db`) содержит таблицы:
-- `signals`
-- `trades`
-- `trade_events`
-- `stats_snapshots`
+`telegram.enabled`: включить Telegram уведомления.  
+`telegram.send_signals`: отправлять сообщения о новых сигналах.  
+`telegram.send_positions`: отправлять сообщения по позициям и событиям портфеля.  
+`telegram.send_daily_report`: отправлять ежедневный отчет.
 
-## Запуск тестов
+# 9. Что приходит в Telegram
 
-```powershell
-python -m unittest discover -s tests -v
-```
+Типовые сообщения:
+- новый сигнал;
+- открыта позиция;
+- закрыта позиция;
+- дневной отчет.
 
-На текущей версии проходит 44 теста.
+Что означают поля:
+- `entry`: цена входа;
+- `stop`: уровень защитного стопа;
+- `take`: целевой уровень фиксации прибыли;
+- `qty`: размер позиции;
+- `planned risk money`: планируемый риск в деньгах;
+- `planned risk %`: планируемый риск в процентах от капитала;
+- `expected RR`: ожидаемое соотношение прибыль/риск.
 
-## Частые проблемы
+Если сигнал отклонен, в Telegram приходит причина (например: превышен риск, limit по группе, sizing reject).
 
-- `MARKET_DATA_MODE=t_invest`, но пустой `INVEST_TOKEN`: приложение отправит critical alert и переключится в `demo`.
-- Telegram включен, но пустые `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`: нотификатор отключится, торговая логика продолжит работу.
-- Неверная структура YAML: приложение завершится с кодом ошибки конфигурации и отправит critical alert (если Telegram доступен).
+# 10. Как проверять, что всё работает
 
-## Важно
+Проверяйте три вещи:
+- появляются новые сигналы и события позиций;
+- приходят Telegram уведомления;
+- формируется ежедневный отчет.
 
-- Проект не отправляет реальные ордера на биржу.
-- Все торговые параметры должны задаваться через конфиги, а не хардкодом.
+Практически:
+- смотрите консоль и папку `logs`;
+- смотрите базу `signals.db` (она хранит сигналы, сделки, события);
+- проверяйте, что в daily report есть блок риска и открытых позиций.
+
+# 11. Ограничения системы
+
+Честно о границах:
+- нет гарантии прибыли;
+- рынок меняется, старые паттерны могут перестать работать;
+- даже хорошая стратегия переживает убыточные периоды;
+- систему нужно регулярно проверять и пересматривать параметры.
+
+# 12. Как правильно использовать
+
+Рекомендуемый порядок:
+- сначала только `paper trading`;
+- не переходить сразу на реальные деньги;
+- не менять параметры каждый день;
+- дать системе время пройти через разные рыночные фазы;
+- принимать решение по серии сделок, а не по одному дню.
+
+# 13. Частые ошибки
+
+`Не приходят сигналы`:
+- проверьте, что инструмент включен в `instruments.yaml`;
+- проверьте, что стратегия разрешена в `strategies.yaml`;
+- проверьте, что в `strategy_params.by_mode.swing` стратегия не выключена для инструмента;
+- проверьте корректность времени/таймфрейма и загрузки данных.
+
+`Слишком мало сделок`:
+- это нормально для swing;
+- система может жестко фильтровать плохие входы;
+- проверьте слишком строгие лимиты риска и RR.
+
+`Хочу увеличить риск`:
+- делайте это очень осторожно;
+- сначала прогоните backtest/paper с новым риском;
+- рост риска увеличивает и просадку.
+
+`Почему нет прибыли каждый день`:
+- прибыль в торговых системах не линейна;
+- важнее результат за серию недель/месяцев, а не за 1 день.
+
+# 14. Куда смотреть дальше
+
+- Логи: папка `logs/`.
+- База с результатами: `signals.db`.
+- Документ по риск-модели: `RISK_MODEL.md`.
+- Конфиги: `config/params.yaml`, `config/instruments.yaml`, `config/strategies.yaml`.
+
+Если цель — безопасный старт, держите фокус на 3 вещах: стабильность запуска, качество риск-контроля, дисциплина в paper режиме.

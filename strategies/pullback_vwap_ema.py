@@ -1,10 +1,8 @@
-﻿"""Trend Pullback to VWAP/EMA strategy."""
+"""Swing trend pullback strategy based on EMA20/50/200 structure."""
 
 from __future__ import annotations
 
-from statistics import mean
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from core.models import MarketRegime, SignalDirection, StrategyContext, StrategySignal
 from strategies.base import BaseStrategy
@@ -12,12 +10,18 @@ from strategies.mtf import mtf_alignment
 
 
 class TrendPullbackVWAPEMAStrategy(BaseStrategy):
-    """Trend continuation entry after controlled pullback and confirmation."""
+    """Classic swing pullback setup: trend by EMA50/200, pullback to EMA20-50 zone."""
 
     name = "trend_pullback_vwap_ema"
     allowed_regime = MarketRegime.TREND
 
-    def evaluate(self, context: StrategyContext) -> StrategySignal | None:
+    def generate_signals(self, context: StrategyContext) -> list[StrategySignal]:
+        signal = self._evaluate_one(context)
+        if signal is None:
+            return []
+        return [signal]
+
+    def _evaluate_one(self, context: StrategyContext) -> StrategySignal | None:
         context_score = _strategy_context_score(
             context=context,
             strategy_name=self.name,
@@ -27,33 +31,34 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             return None
 
         candles = context.candles
-        impulse_bars = self._int("impulse_bars", 3)
-        min_required = impulse_bars + 2
-        if len(candles) < min_required:
-            return None
-
-        atr = context.indicators.atr
+        atr = float(context.indicators.atr)
         if atr <= 0:
             return None
 
-        if _entry_time_blocked(context=context, params=self.params):
+        pullback_period = max(2, self._int("pullback_ema_period", 20))
+        trend_period = max(pullback_period + 1, self._int("trend_ema_period", 50))
+        anchor_period = max(trend_period + 1, self._int("anchor_ema_period", 200))
+        pullback_lookback = max(2, self._int("pullback_lookback_bars", 6))
+        stop_lookback = max(2, self._int("stop_lookback_bars", 8))
+        trend_slope_bars = max(1, self._int("trend_slope_bars", 3))
+        min_required = max(anchor_period + trend_slope_bars + 2, pullback_lookback + 3, stop_lookback + 2)
+        if len(candles) < min_required:
             return None
 
-        long_bias = (
-            context.indicators.close > context.indicators.vwap
-            and context.indicators.ema_fast > context.indicators.ema_slow
-        )
-        short_bias = (
-            context.indicators.close < context.indicators.vwap
-            and context.indicators.ema_fast < context.indicators.ema_slow
-        )
+        closes = [item.close for item in candles]
+        ema_pullback = _ema_series(closes, period=pullback_period)
+        ema_trend = _ema_series(closes, period=trend_period)
+        ema_anchor = _ema_series(closes, period=anchor_period)
 
-        direction: SignalDirection | None
-        if long_bias:
-            direction = SignalDirection.LONG
-        elif short_bias:
-            direction = SignalDirection.SHORT
-        else:
+        direction = _trend_direction(
+            close=closes[-1],
+            ema_trend=ema_trend,
+            ema_anchor=ema_anchor,
+            atr=atr,
+            slope_bars=trend_slope_bars,
+            min_trend_slope_atr=self._float("min_trend_slope_atr", 0.02),
+        )
+        if direction is None:
             return None
 
         mtf_ok, mtf_meta = mtf_alignment(
@@ -61,227 +66,113 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             candles=candles,
             source_timeframe=context.timeframe,
             direction=direction,
-            trend_timeframe=self._str("trend_timeframe", "1hour"),
-            setup_timeframe=self._str("setup_timeframe", "15min"),
-            fast_ema=max(2, self._int("mtf_fast_ema", 8)),
-            slow_ema=max(3, self._int("mtf_slow_ema", 21)),
+            trend_timeframe=self._str("trend_timeframe", "4hour"),
+            setup_timeframe=self._str("setup_timeframe", "1hour"),
+            fast_ema=max(2, self._int("mtf_fast_ema", 20)),
+            slow_ema=max(3, self._int("mtf_slow_ema", 50)),
             slope_bars=max(1, self._int("mtf_slope_bars", 2)),
         )
         if not mtf_ok:
             return None
 
-        impulse = candles[-(impulse_bars + 2) : -2]
-        pullback = candles[-2]
-        confirm = candles[-1]
-        impulse_vwap, pullback_vwap = _select_impulse_and_pullback_vwap(
-            candles=candles,
-            impulse_bars=impulse_bars,
-            timezone_name=_strategy_timezone(context),
-        )
-        ema_fast_series = _ema_series(
-            [item.close for item in candles],
-            period=_indicator_ema_fast_period(context),
-        )
-        pullback_ema_fast = ema_fast_series[-2]
-
         if direction == SignalDirection.LONG:
             return self._evaluate_long(
                 context=context,
                 context_score=context_score,
-                impulse=impulse,
-                pullback=pullback,
-                confirm=confirm,
-                impulse_vwap=impulse_vwap,
-                pullback_vwap=pullback_vwap,
-                pullback_ema_fast=pullback_ema_fast,
+                ema_pullback=ema_pullback,
+                ema_trend=ema_trend,
+                ema_anchor=ema_anchor,
+                pullback_lookback=pullback_lookback,
+                stop_lookback=stop_lookback,
                 mtf_meta=mtf_meta,
             )
         return self._evaluate_short(
             context=context,
             context_score=context_score,
-            impulse=impulse,
-            pullback=pullback,
-            confirm=confirm,
-            impulse_vwap=impulse_vwap,
-            pullback_vwap=pullback_vwap,
-            pullback_ema_fast=pullback_ema_fast,
+            ema_pullback=ema_pullback,
+            ema_trend=ema_trend,
+            ema_anchor=ema_anchor,
+            pullback_lookback=pullback_lookback,
+            stop_lookback=stop_lookback,
             mtf_meta=mtf_meta,
         )
 
     def _evaluate_long(
         self,
+        *,
         context: StrategyContext,
         context_score: float,
-        impulse: list,
-        pullback,
-        confirm,
-        impulse_vwap: list[float],
-        pullback_vwap: float,
-        pullback_ema_fast: float,
+        ema_pullback: list[float],
+        ema_trend: list[float],
+        ema_anchor: list[float],
+        pullback_lookback: int,
+        stop_lookback: int,
         mtf_meta: dict[str, Any],
     ) -> StrategySignal | None:
-        atr = context.indicators.atr
-        impulse_atr_mult = self._float("impulse_atr_mult", 0.6)
-        move = impulse[-1].close - impulse[0].open
-        if move < impulse_atr_mult * atr:
+        candles = context.candles
+        atr = float(context.indicators.atr)
+        pullback = candles[-2]
+        confirm = candles[-1]
+
+        zone_tolerance = self._float("pullback_zone_tolerance_atr", 0.20) * atr
+        ema20_pull = ema_pullback[-2]
+        ema50_pull = ema_trend[-2]
+        ema200_pull = ema_anchor[-2]
+        zone_low = min(ema20_pull, ema50_pull) - zone_tolerance
+        zone_high = max(ema20_pull, ema50_pull) + zone_tolerance
+
+        if pullback.high < zone_low or pullback.low > zone_high:
+            return None
+        if pullback.low < (ema200_pull - self._float("anchor_breach_tolerance_atr", 0.25) * atr):
             return None
 
-        min_bullish = self._int("min_bullish_bars_in_impulse", 1)
-        bullish_count = sum(1 for item in impulse if item.close > item.open)
-        if bullish_count < min_bullish:
+        recent_segment = candles[-(pullback_lookback + 2) : -2]
+        if not recent_segment:
+            return None
+        recent_high = max(item.high for item in recent_segment)
+        counter_trend_bars = sum(1 for item in candles[-(pullback_lookback + 1) : -1] if item.close < item.open)
+        if counter_trend_bars < self._int("min_counter_trend_bars", 1):
             return None
 
-        avg_impulse_volume = mean(item.volume for item in impulse)
-        volume_ratio = avg_impulse_volume / max(context.indicators.rolling_volume_avg, 1e-9)
-        if volume_ratio < self._float("volume_impulse_mult", 0.9):
+        pullback_depth = recent_high - pullback.low
+        min_depth = self._float("pullback_min_depth_atr", 0.25) * atr
+        max_depth = self._float("pullback_max_depth_atr", 3.25) * atr
+        if pullback_depth < min_depth or pullback_depth > max_depth:
             return None
 
-        max_extension = max(
-            item.high - impulse_vwap[idx]
-            for idx, item in enumerate(impulse)
-        )
-        min_ext = self._float("min_vwap_extension_atr", 0.0) * atr
-        max_ext = self._float("max_vwap_extension_atr", 3.0) * atr
-        if not (min_ext <= max_extension <= max_ext):
+        confirm_body = confirm.close - confirm.open
+        if confirm_body <= self._float("confirmation_body_min_atr", 0.10) * atr:
+            return None
+        if confirm.close <= max(ema_pullback[-1], ema_trend[-1]):
+            return None
+        break_buffer = self._float("confirmation_break_buffer_atr", 0.05) * atr
+        if confirm.close <= (pullback.high + break_buffer):
             return None
 
-        impulse_high = max(item.high for item in impulse)
-        pullback_depth = impulse_high - pullback.low
-        if pullback_depth < self._float("pullback_min_atr", 0.08) * atr:
-            return None
-        if pullback_depth > self._float("pullback_max_atr", 1.8) * atr:
-            return None
-
-        zone_mode = self._str("pullback_location_mode", "ANY")
-        touched_vwap = pullback.low <= pullback_vwap <= pullback.high
-        touched_ema = pullback.low <= pullback_ema_fast <= pullback.high
-        anchor_distance = min(
-            _distance_to_range(level=pullback_vwap, low=pullback.low, high=pullback.high),
-            _distance_to_range(level=pullback_ema_fast, low=pullback.low, high=pullback.high),
-        )
-        if zone_mode == "VWAP_ONLY" and not touched_vwap:
-            return None
-        if zone_mode == "EMA_FAST_ONLY" and not touched_ema:
-            return None
-        if zone_mode in {"VWAP_OR_EMA_FAST", "VWAP_EMA_ZONE"} and not (touched_vwap or touched_ema):
-            return None
-        if zone_mode == "ANY" and self._bool("enforce_anchor_proximity_any", False):
-            max_anchor_distance = self._float("pullback_anchor_max_distance_atr", 0.35) * atr
-            if anchor_distance > max_anchor_distance:
-                return None
-
-        confirm_body = abs(confirm.close - confirm.open)
-        if confirm_body < self._float("confirmation_body_min_atr", 0.05) * atr:
-            return None
-
-        if confirm.close <= confirm.open:
-            return None
-        if confirm.close <= pullback.close:
-            return None
-        confirmation_delta = self._float("confirmation_close_delta_atr", 0.02) * atr
-        if (confirm.close - pullback.close) < confirmation_delta:
-            return None
-        confirmation_break_mode = self._str("confirmation_break_mode", "BODY").strip().upper()
-        if confirmation_break_mode == "EXTREME" and confirm.close <= pullback.high:
-            return None
-        if self._bool("confirmation_reclaim_ema_fast", False) and confirm.close <= pullback_ema_fast:
-            return None
-        if self._bool("confirmation_reclaim_vwap", False) and confirm.close <= pullback_vwap:
-            return None
-
-        stop = pullback.low - self._float("stop_buffer_atr", 0.15) * atr
         entry = confirm.close
+        stop_extreme = min(item.low for item in candles[-(stop_lookback + 1) : -1])
+        atr_stop = entry - self._float("stop_atr_mult", 1.25) * atr
+        stop = min(stop_extreme - self._float("stop_buffer_atr", 0.10) * atr, atr_stop)
         risk = entry - stop
         if risk <= 0:
             return None
 
-        pullback_depth_atr = pullback_depth / atr
-        anchor_distance_atr = anchor_distance / atr
-        extension_atr = max_extension / atr
-        confirm_body_atr = confirm_body / atr
-        confirm_close_strength = _close_strength(
-            close=confirm.close,
-            low=confirm.low,
-            high=confirm.high,
-        )
-        entry_location_in_day_range = _entry_location_in_day_range(
-            candles=context.candles,
-            entry=entry,
-            timezone_name=_strategy_timezone(context),
-        )
-        timing_quality, timing_reason = _timing_quality(
-            context=context,
-            low_expectancy_hours_local=_parse_hours(
-                self.params.get("low_expectancy_hours_local", [])
-            ),
-        )
-        late_trend_flag = _is_late_trend(
-            direction=SignalDirection.LONG,
-            extension_atr=extension_atr,
-            entry_location_in_day_range=entry_location_in_day_range,
-            late_extension_atr=self._float("late_trend_extension_atr", 1.6),
-            late_day_range_pos_long=self._float("late_trend_day_range_pos_long", 0.85),
-            late_day_range_pos_short=self._float("late_trend_day_range_pos_short", 0.15),
-        )
-        if late_trend_flag and self._bool("block_late_trend_entries", False):
-            return None
-        if timing_reason is not None and self._bool("block_low_expectancy_hours", True):
-            return None
+        tp1_r = max(2.0, self._float("tp1_r", 2.0))
+        tp2_r = max(self._float("tp2_r", 3.0), tp1_r)
+        tp1 = entry + tp1_r * risk
+        tp2 = entry + tp2_r * risk
 
-        pullback_type = _pullback_type(
-            depth_atr=pullback_depth_atr,
-            anchor_distance_atr=anchor_distance_atr,
-            pullback_max_atr=self._float("pullback_max_atr", 1.8),
-            noise_anchor_distance_atr=self._float("noise_pullback_anchor_distance_atr", 0.45),
-            exhaustion_share=self._float("exhaustion_pullback_share_of_max", 0.75),
+        trend_strength = _clamp01((ema_trend[-1] - ema_anchor[-1]) / max(atr * self._float("trend_strength_atr", 1.5), 1e-9))
+        zone_quality = _zone_quality(
+            pullback_low=pullback.low,
+            pullback_high=pullback.high,
+            zone_low=zone_low,
+            zone_high=zone_high,
+            atr=atr,
         )
-        impulse_quality = _clamp01(
-            (
-                0.45 * _safe_ratio(move / atr, self._float("impulse_atr_mult", 0.6))
-                + 0.25 * _safe_ratio(float(bullish_count), float(len(impulse)))
-                + 0.30 * _safe_ratio(volume_ratio, self._float("volume_impulse_mult", 0.9))
-            )
-        )
-        pullback_depth_quality = _depth_quality(
-            depth_atr=pullback_depth_atr,
-            min_depth_atr=self._float("pullback_min_atr", 0.08),
-            max_depth_atr=self._float("pullback_max_atr", 1.8),
-        )
-        pullback_anchor_quality = _clamp01(
-            1.0 - _safe_ratio(anchor_distance_atr, self._float("pullback_anchor_max_distance_atr", 0.35))
-        )
-        pullback_quality = _clamp01(
-            (0.55 * pullback_depth_quality + 0.45 * pullback_anchor_quality)
-            * _pullback_type_multiplier(pullback_type)
-        )
-        confirm_quality = _clamp01(
-            0.50 * _safe_ratio(confirm_body_atr, self._float("confirmation_body_min_atr", 0.05))
-            + 0.50 * confirm_close_strength
-        )
-        extension_quality = _clamp01(
-            1.0 - max(0.0, extension_atr - self._float("late_trend_extension_atr", 1.6)) / 2.0
-        )
-        setup_quality = _clamp01(
-            0.30 * impulse_quality
-            + 0.25 * pullback_quality
-            + 0.25 * confirm_quality
-            + 0.10 * extension_quality
-            + 0.10 * timing_quality
-        )
-        if self._bool("enforce_setup_quality_threshold", False) and setup_quality < self._float(
-            "min_setup_quality_score",
-            0.55,
-        ):
-            return None
+        confirm_quality = _clamp01(confirm_body / max(self._float("confirmation_body_min_atr", 0.10) * atr, 1e-9))
+        setup_quality = _clamp01(0.40 * trend_strength + 0.30 * zone_quality + 0.30 * confirm_quality)
 
-        reason_codes = _build_reason_codes(
-            pullback_type=pullback_type,
-            late_trend_flag=late_trend_flag,
-            timing_reason=timing_reason,
-        )
-
-        tp1 = entry + self._float("tp1_r", 1.0) * risk
-        tp2 = entry + self._float("tp2_r", 2.0) * risk
         return self.build_signal(
             context=context,
             direction=SignalDirection.LONG,
@@ -291,202 +182,101 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             tp1=tp1,
             tp2=tp2,
             metadata={
-                "impulse_size_atr": move / atr,
-                "pullback_depth_atr": pullback_depth_atr,
-                "volume_ratio": volume_ratio,
-                "pullback_vwap": pullback_vwap,
-                "pullback_ema_fast": pullback_ema_fast,
-                "anchor_distance_atr": anchor_distance_atr,
-                "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
                 "setup_quality_score": setup_quality,
-                "impulse_quality_score": impulse_quality,
-                "pullback_quality_score": pullback_quality,
+                "trend_strength_score": trend_strength,
+                "pullback_quality_score": zone_quality,
                 "confirm_quality_score": confirm_quality,
-                "late_trend_flag": late_trend_flag,
-                "entry_location_in_day_range": entry_location_in_day_range,
-                "pullback_type": pullback_type,
-                "confirm_close_strength": confirm_close_strength,
                 "strategy_context_score": context_score,
-                "reason_codes": reason_codes,
+                "pullback_depth_atr": pullback_depth / max(atr, 1e-9),
+                "pullback_zone_low": zone_low,
+                "pullback_zone_high": zone_high,
+                "ema_pullback": ema_pullback[-1],
+                "ema_trend": ema_trend[-1],
+                "ema_anchor": ema_anchor[-1],
+                "rr_primary": tp1_r,
+                "rr_secondary": tp2_r,
+                "reason_codes": ["trend_filter_pass", "pullback_zone_touch", "bullish_confirmation"],
                 **mtf_meta,
             },
         )
 
     def _evaluate_short(
         self,
+        *,
         context: StrategyContext,
         context_score: float,
-        impulse: list,
-        pullback,
-        confirm,
-        impulse_vwap: list[float],
-        pullback_vwap: float,
-        pullback_ema_fast: float,
+        ema_pullback: list[float],
+        ema_trend: list[float],
+        ema_anchor: list[float],
+        pullback_lookback: int,
+        stop_lookback: int,
         mtf_meta: dict[str, Any],
     ) -> StrategySignal | None:
-        atr = context.indicators.atr
-        impulse_atr_mult = self._float("impulse_atr_mult", 0.6)
-        move = impulse[0].open - impulse[-1].close
-        if move < impulse_atr_mult * atr:
+        candles = context.candles
+        atr = float(context.indicators.atr)
+        pullback = candles[-2]
+        confirm = candles[-1]
+
+        zone_tolerance = self._float("pullback_zone_tolerance_atr", 0.20) * atr
+        ema20_pull = ema_pullback[-2]
+        ema50_pull = ema_trend[-2]
+        ema200_pull = ema_anchor[-2]
+        zone_low = min(ema20_pull, ema50_pull) - zone_tolerance
+        zone_high = max(ema20_pull, ema50_pull) + zone_tolerance
+
+        if pullback.high < zone_low or pullback.low > zone_high:
+            return None
+        if pullback.high > (ema200_pull + self._float("anchor_breach_tolerance_atr", 0.25) * atr):
             return None
 
-        min_bearish = self._int("min_bearish_bars_in_impulse", 1)
-        bearish_count = sum(1 for item in impulse if item.close < item.open)
-        if bearish_count < min_bearish:
+        recent_segment = candles[-(pullback_lookback + 2) : -2]
+        if not recent_segment:
+            return None
+        recent_low = min(item.low for item in recent_segment)
+        counter_trend_bars = sum(1 for item in candles[-(pullback_lookback + 1) : -1] if item.close > item.open)
+        if counter_trend_bars < self._int("min_counter_trend_bars", 1):
             return None
 
-        avg_impulse_volume = mean(item.volume for item in impulse)
-        volume_ratio = avg_impulse_volume / max(context.indicators.rolling_volume_avg, 1e-9)
-        if volume_ratio < self._float("volume_impulse_mult", 0.9):
+        pullback_depth = pullback.high - recent_low
+        min_depth = self._float("pullback_min_depth_atr", 0.25) * atr
+        max_depth = self._float("pullback_max_depth_atr", 3.25) * atr
+        if pullback_depth < min_depth or pullback_depth > max_depth:
             return None
 
-        max_extension = max(
-            impulse_vwap[idx] - item.low
-            for idx, item in enumerate(impulse)
-        )
-        min_ext = self._float("min_vwap_extension_atr", 0.0) * atr
-        max_ext = self._float("max_vwap_extension_atr", 3.0) * atr
-        if not (min_ext <= max_extension <= max_ext):
+        confirm_body = confirm.open - confirm.close
+        if confirm_body <= self._float("confirmation_body_min_atr", 0.10) * atr:
+            return None
+        if confirm.close >= min(ema_pullback[-1], ema_trend[-1]):
+            return None
+        break_buffer = self._float("confirmation_break_buffer_atr", 0.05) * atr
+        if confirm.close >= (pullback.low - break_buffer):
             return None
 
-        impulse_low = min(item.low for item in impulse)
-        pullback_depth = pullback.high - impulse_low
-        if pullback_depth < self._float("pullback_min_atr", 0.08) * atr:
-            return None
-        if pullback_depth > self._float("pullback_max_atr", 1.8) * atr:
-            return None
-
-        zone_mode = self._str("pullback_location_mode", "ANY")
-        touched_vwap = pullback.low <= pullback_vwap <= pullback.high
-        touched_ema = pullback.low <= pullback_ema_fast <= pullback.high
-        anchor_distance = min(
-            _distance_to_range(level=pullback_vwap, low=pullback.low, high=pullback.high),
-            _distance_to_range(level=pullback_ema_fast, low=pullback.low, high=pullback.high),
-        )
-        if zone_mode == "VWAP_ONLY" and not touched_vwap:
-            return None
-        if zone_mode == "EMA_FAST_ONLY" and not touched_ema:
-            return None
-        if zone_mode in {"VWAP_OR_EMA_FAST", "VWAP_EMA_ZONE"} and not (touched_vwap or touched_ema):
-            return None
-        if zone_mode == "ANY" and self._bool("enforce_anchor_proximity_any", False):
-            max_anchor_distance = self._float("pullback_anchor_max_distance_atr", 0.35) * atr
-            if anchor_distance > max_anchor_distance:
-                return None
-
-        confirm_body = abs(confirm.close - confirm.open)
-        if confirm_body < self._float("confirmation_body_min_atr", 0.05) * atr:
-            return None
-
-        if confirm.close >= confirm.open:
-            return None
-        if confirm.close >= pullback.close:
-            return None
-        confirmation_delta = self._float("confirmation_close_delta_atr", 0.02) * atr
-        if (pullback.close - confirm.close) < confirmation_delta:
-            return None
-        confirmation_break_mode = self._str("confirmation_break_mode", "BODY").strip().upper()
-        if confirmation_break_mode == "EXTREME" and confirm.close >= pullback.low:
-            return None
-        if self._bool("confirmation_reclaim_ema_fast", False) and confirm.close >= pullback_ema_fast:
-            return None
-        if self._bool("confirmation_reclaim_vwap", False) and confirm.close >= pullback_vwap:
-            return None
-
-        stop = pullback.high + self._float("stop_buffer_atr", 0.15) * atr
         entry = confirm.close
+        stop_extreme = max(item.high for item in candles[-(stop_lookback + 1) : -1])
+        atr_stop = entry + self._float("stop_atr_mult", 1.25) * atr
+        stop = max(stop_extreme + self._float("stop_buffer_atr", 0.10) * atr, atr_stop)
         risk = stop - entry
         if risk <= 0:
             return None
 
-        pullback_depth_atr = pullback_depth / atr
-        anchor_distance_atr = anchor_distance / atr
-        extension_atr = max_extension / atr
-        confirm_body_atr = confirm_body / atr
-        confirm_close_strength = _close_strength_short(
-            close=confirm.close,
-            low=confirm.low,
-            high=confirm.high,
-        )
-        entry_location_in_day_range = _entry_location_in_day_range(
-            candles=context.candles,
-            entry=entry,
-            timezone_name=_strategy_timezone(context),
-        )
-        timing_quality, timing_reason = _timing_quality(
-            context=context,
-            low_expectancy_hours_local=_parse_hours(
-                self.params.get("low_expectancy_hours_local", [])
-            ),
-        )
-        late_trend_flag = _is_late_trend(
-            direction=SignalDirection.SHORT,
-            extension_atr=extension_atr,
-            entry_location_in_day_range=entry_location_in_day_range,
-            late_extension_atr=self._float("late_trend_extension_atr", 1.6),
-            late_day_range_pos_long=self._float("late_trend_day_range_pos_long", 0.85),
-            late_day_range_pos_short=self._float("late_trend_day_range_pos_short", 0.15),
-        )
-        if late_trend_flag and self._bool("block_late_trend_entries", False):
-            return None
-        if timing_reason is not None and self._bool("block_low_expectancy_hours", True):
-            return None
+        tp1_r = max(2.0, self._float("tp1_r", 2.0))
+        tp2_r = max(self._float("tp2_r", 3.0), tp1_r)
+        tp1 = entry - tp1_r * risk
+        tp2 = entry - tp2_r * risk
 
-        pullback_type = _pullback_type(
-            depth_atr=pullback_depth_atr,
-            anchor_distance_atr=anchor_distance_atr,
-            pullback_max_atr=self._float("pullback_max_atr", 1.8),
-            noise_anchor_distance_atr=self._float("noise_pullback_anchor_distance_atr", 0.45),
-            exhaustion_share=self._float("exhaustion_pullback_share_of_max", 0.75),
+        trend_strength = _clamp01((ema_anchor[-1] - ema_trend[-1]) / max(atr * self._float("trend_strength_atr", 1.5), 1e-9))
+        zone_quality = _zone_quality(
+            pullback_low=pullback.low,
+            pullback_high=pullback.high,
+            zone_low=zone_low,
+            zone_high=zone_high,
+            atr=atr,
         )
-        impulse_quality = _clamp01(
-            (
-                0.45 * _safe_ratio(move / atr, self._float("impulse_atr_mult", 0.6))
-                + 0.25 * _safe_ratio(float(bearish_count), float(len(impulse)))
-                + 0.30 * _safe_ratio(volume_ratio, self._float("volume_impulse_mult", 0.9))
-            )
-        )
-        pullback_depth_quality = _depth_quality(
-            depth_atr=pullback_depth_atr,
-            min_depth_atr=self._float("pullback_min_atr", 0.08),
-            max_depth_atr=self._float("pullback_max_atr", 1.8),
-        )
-        pullback_anchor_quality = _clamp01(
-            1.0 - _safe_ratio(anchor_distance_atr, self._float("pullback_anchor_max_distance_atr", 0.35))
-        )
-        pullback_quality = _clamp01(
-            (0.55 * pullback_depth_quality + 0.45 * pullback_anchor_quality)
-            * _pullback_type_multiplier(pullback_type)
-        )
-        confirm_quality = _clamp01(
-            0.50 * _safe_ratio(confirm_body_atr, self._float("confirmation_body_min_atr", 0.05))
-            + 0.50 * confirm_close_strength
-        )
-        extension_quality = _clamp01(
-            1.0 - max(0.0, extension_atr - self._float("late_trend_extension_atr", 1.6)) / 2.0
-        )
-        setup_quality = _clamp01(
-            0.30 * impulse_quality
-            + 0.25 * pullback_quality
-            + 0.25 * confirm_quality
-            + 0.10 * extension_quality
-            + 0.10 * timing_quality
-        )
-        if self._bool("enforce_setup_quality_threshold", False) and setup_quality < self._float(
-            "min_setup_quality_score",
-            0.55,
-        ):
-            return None
+        confirm_quality = _clamp01(confirm_body / max(self._float("confirmation_body_min_atr", 0.10) * atr, 1e-9))
+        setup_quality = _clamp01(0.40 * trend_strength + 0.30 * zone_quality + 0.30 * confirm_quality)
 
-        reason_codes = _build_reason_codes(
-            pullback_type=pullback_type,
-            late_trend_flag=late_trend_flag,
-            timing_reason=timing_reason,
-        )
-
-        tp1 = entry - self._float("tp1_r", 1.0) * risk
-        tp2 = entry - self._float("tp2_r", 2.0) * risk
         return self.build_signal(
             context=context,
             direction=SignalDirection.SHORT,
@@ -496,50 +286,64 @@ class TrendPullbackVWAPEMAStrategy(BaseStrategy):
             tp1=tp1,
             tp2=tp2,
             metadata={
-                "impulse_size_atr": move / atr,
-                "pullback_depth_atr": pullback_depth_atr,
-                "volume_ratio": volume_ratio,
-                "pullback_vwap": pullback_vwap,
-                "pullback_ema_fast": pullback_ema_fast,
-                "anchor_distance_atr": anchor_distance_atr,
-                "touched_zone": _touched_zone_label(touched_vwap=touched_vwap, touched_ema=touched_ema),
                 "structure_valid": True,
                 "setup_quality_score": setup_quality,
-                "impulse_quality_score": impulse_quality,
-                "pullback_quality_score": pullback_quality,
+                "trend_strength_score": trend_strength,
+                "pullback_quality_score": zone_quality,
                 "confirm_quality_score": confirm_quality,
-                "late_trend_flag": late_trend_flag,
-                "entry_location_in_day_range": entry_location_in_day_range,
-                "pullback_type": pullback_type,
-                "confirm_close_strength": confirm_close_strength,
                 "strategy_context_score": context_score,
-                "reason_codes": reason_codes,
+                "pullback_depth_atr": pullback_depth / max(atr, 1e-9),
+                "pullback_zone_low": zone_low,
+                "pullback_zone_high": zone_high,
+                "ema_pullback": ema_pullback[-1],
+                "ema_trend": ema_trend[-1],
+                "ema_anchor": ema_anchor[-1],
+                "rr_primary": tp1_r,
+                "rr_secondary": tp2_r,
+                "reason_codes": ["trend_filter_pass", "pullback_zone_touch", "bearish_confirmation"],
                 **mtf_meta,
             },
         )
 
 
-def _touched_zone_label(*, touched_vwap: bool, touched_ema: bool) -> str:
-    if touched_vwap and touched_ema:
-        return "VWAP_AND_EMA_FAST"
-    if touched_vwap:
-        return "VWAP"
-    if touched_ema:
-        return "EMA_FAST"
-    return "NONE"
+def _trend_direction(
+    *,
+    close: float,
+    ema_trend: list[float],
+    ema_anchor: list[float],
+    atr: float,
+    slope_bars: int,
+    min_trend_slope_atr: float,
+) -> SignalDirection | None:
+    if len(ema_trend) <= slope_bars or len(ema_anchor) <= slope_bars:
+        return None
+
+    trend_last = ema_trend[-1]
+    anchor_last = ema_anchor[-1]
+    slope = trend_last - ema_trend[-1 - slope_bars]
+    slope_threshold = min_trend_slope_atr * atr
+
+    if trend_last > anchor_last and close > anchor_last and slope > slope_threshold:
+        return SignalDirection.LONG
+    if trend_last < anchor_last and close < anchor_last and slope < -slope_threshold:
+        return SignalDirection.SHORT
+    return None
 
 
-def _indicator_ema_fast_period(context: StrategyContext) -> int:
-    indicator_cfg = context.params.get("indicator_engine", {})
-    if not isinstance(indicator_cfg, dict):
-        return 20
-    return max(2, int(indicator_cfg.get("ema_fast", 20)))
-
-
-def _strategy_timezone(context: StrategyContext) -> str:
-    if context.instrument.sessions:
-        return context.instrument.sessions[0].timezone
-    return "UTC"
+def _zone_quality(
+    *,
+    pullback_low: float,
+    pullback_high: float,
+    zone_low: float,
+    zone_high: float,
+    atr: float,
+) -> float:
+    if pullback_high < zone_low or pullback_low > zone_high:
+        return 0.0
+    mid_zone = (zone_low + zone_high) / 2.0
+    candle_mid = (pullback_low + pullback_high) / 2.0
+    distance = abs(candle_mid - mid_zone)
+    return _clamp01(1.0 - distance / max(atr, 1e-9))
 
 
 def _strategy_context_score(
@@ -554,44 +358,6 @@ def _strategy_context_score(
     return 1.0 if context.regime == fallback_regime else 0.0
 
 
-def _session_vwap_series(candles: list, *, timezone_name: str) -> list[float]:
-    zone = ZoneInfo(timezone_name)
-    result: list[float] = []
-
-    current_session = None
-    cumulative_tpv = 0.0
-    cumulative_vol = 0.0
-
-    for candle in candles:
-        session_key = candle.datetime.astimezone(zone).date()
-        if session_key != current_session:
-            current_session = session_key
-            cumulative_tpv = 0.0
-            cumulative_vol = 0.0
-
-        typical = (candle.high + candle.low + candle.close) / 3.0
-        cumulative_tpv += typical * candle.volume
-        cumulative_vol += candle.volume
-        if cumulative_vol <= 0:
-            result.append(candle.close)
-        else:
-            result.append(cumulative_tpv / cumulative_vol)
-
-    return result
-
-
-def _select_impulse_and_pullback_vwap(
-    *,
-    candles: list,
-    impulse_bars: int,
-    timezone_name: str,
-) -> tuple[list[float], float]:
-    vwap_series = _session_vwap_series(candles, timezone_name=timezone_name)
-    impulse = vwap_series[-(impulse_bars + 2) : -2]
-    pullback_vwap = vwap_series[-2]
-    return impulse, pullback_vwap
-
-
 def _ema_series(values: list[float], *, period: int) -> list[float]:
     alpha = 2.0 / (max(period, 2) + 1.0)
     result: list[float] = []
@@ -603,194 +369,9 @@ def _ema_series(values: list[float], *, period: int) -> list[float]:
     return result
 
 
-def _distance_to_range(*, level: float, low: float, high: float) -> float:
-    if low <= level <= high:
-        return 0.0
-    if level < low:
-        return low - level
-    return level - high
-
-
-def _safe_ratio(value: float, baseline: float) -> float:
-    if baseline <= 0:
-        return 0.0
-    return value / baseline
-
-
 def _clamp01(value: float) -> float:
     if value <= 0.0:
         return 0.0
     if value >= 1.0:
         return 1.0
     return float(value)
-
-
-def _close_strength(*, close: float, low: float, high: float) -> float:
-    candle_range = max(high - low, 1e-9)
-    return _clamp01((close - low) / candle_range)
-
-
-def _close_strength_short(*, close: float, low: float, high: float) -> float:
-    candle_range = max(high - low, 1e-9)
-    return _clamp01((high - close) / candle_range)
-
-
-def _pullback_type(
-    *,
-    depth_atr: float,
-    anchor_distance_atr: float,
-    pullback_max_atr: float,
-    noise_anchor_distance_atr: float,
-    exhaustion_share: float,
-) -> str:
-    exhaustion_threshold = max(0.0, pullback_max_atr * exhaustion_share)
-    if depth_atr >= exhaustion_threshold:
-        return "exhaustion_pullback"
-    if anchor_distance_atr > noise_anchor_distance_atr:
-        return "random_noise_retracement"
-    return "healthy_pullback"
-
-
-def _pullback_type_multiplier(pullback_type: str) -> float:
-    if pullback_type == "healthy_pullback":
-        return 1.0
-    if pullback_type == "exhaustion_pullback":
-        return 0.6
-    return 0.45
-
-
-def _depth_quality(*, depth_atr: float, min_depth_atr: float, max_depth_atr: float) -> float:
-    if max_depth_atr <= min_depth_atr:
-        return 0.0
-    if depth_atr < min_depth_atr or depth_atr > max_depth_atr:
-        return 0.0
-    midpoint = (min_depth_atr + max_depth_atr) / 2.0
-    half = max((max_depth_atr - min_depth_atr) / 2.0, 1e-9)
-    return _clamp01(1.0 - abs(depth_atr - midpoint) / half)
-
-
-def _entry_location_in_day_range(*, candles: list, entry: float, timezone_name: str) -> float:
-    if not candles:
-        return 0.5
-    zone = ZoneInfo(timezone_name)
-    session_date = candles[-1].datetime.astimezone(zone).date()
-    day_candles = [
-        item
-        for item in candles
-        if item.datetime.astimezone(zone).date() == session_date
-    ]
-    if not day_candles:
-        return 0.5
-    day_high = max(item.high for item in day_candles)
-    day_low = min(item.low for item in day_candles)
-    day_range = max(day_high - day_low, 1e-9)
-    return _clamp01((entry - day_low) / day_range)
-
-
-def _is_late_trend(
-    *,
-    direction: SignalDirection,
-    extension_atr: float,
-    entry_location_in_day_range: float,
-    late_extension_atr: float,
-    late_day_range_pos_long: float,
-    late_day_range_pos_short: float,
-) -> bool:
-    extension_late = extension_atr >= late_extension_atr
-    if direction == SignalDirection.LONG:
-        location_late = entry_location_in_day_range >= late_day_range_pos_long
-    else:
-        location_late = entry_location_in_day_range <= late_day_range_pos_short
-    return extension_late or location_late
-
-
-def _timing_quality(*, context: StrategyContext, low_expectancy_hours_local: set[int]) -> tuple[float, str | None]:
-    if not low_expectancy_hours_local:
-        return 1.0, None
-    hour = _entry_hour_local(context=context)
-    if hour in low_expectancy_hours_local:
-        return 0.0, "bad_timing"
-    return 1.0, None
-
-
-def _build_reason_codes(
-    *,
-    pullback_type: str,
-    late_trend_flag: bool,
-    timing_reason: str | None,
-) -> list[str]:
-    reason_codes: list[str] = [pullback_type]
-    if late_trend_flag:
-        reason_codes.append("late_move")
-    if timing_reason:
-        reason_codes.append(timing_reason)
-    return reason_codes
-
-
-def _entry_time_blocked(*, context: StrategyContext, params: dict[str, Any]) -> bool:
-    weekday = _entry_weekday_local(context=context)
-    blocked_weekdays = _parse_weekdays(params.get("blocked_entry_weekdays_local", []))
-    if blocked_weekdays and weekday in blocked_weekdays:
-        return True
-
-    allowed_weekdays = _parse_weekdays(params.get("allowed_entry_weekdays_local", []))
-    if allowed_weekdays and weekday not in allowed_weekdays:
-        return True
-
-    raw = params.get("blocked_entry_hours_local", [])
-    blocked = _parse_hours(raw)
-    if not blocked:
-        return False
-
-    hour = _entry_hour_local(context=context)
-    return hour in blocked
-
-
-def _entry_hour_local(*, context: StrategyContext) -> int:
-    zone_name = _strategy_timezone(context)
-    zone = ZoneInfo(zone_name)
-    return context.candles[-1].datetime.astimezone(zone).hour
-
-
-def _entry_weekday_local(*, context: StrategyContext) -> int:
-    zone_name = _strategy_timezone(context)
-    zone = ZoneInfo(zone_name)
-    return context.candles[-1].datetime.astimezone(zone).weekday()
-
-
-def _parse_hours(raw: Any) -> set[int]:
-    if isinstance(raw, str):
-        parts = [item.strip() for item in raw.split(",") if item.strip()]
-    elif isinstance(raw, (list, tuple, set)):
-        parts = list(raw)
-    else:
-        return set()
-
-    out: set[int] = set()
-    for item in parts:
-        try:
-            hour = int(item)
-        except (TypeError, ValueError):
-            continue
-        if 0 <= hour <= 23:
-            out.add(hour)
-    return out
-
-
-def _parse_weekdays(raw: Any) -> set[int]:
-    if isinstance(raw, str):
-        parts = [item.strip() for item in raw.split(",") if item.strip()]
-    elif isinstance(raw, (list, tuple, set)):
-        parts = list(raw)
-    else:
-        return set()
-
-    out: set[int] = set()
-    for item in parts:
-        try:
-            weekday = int(item)
-        except (TypeError, ValueError):
-            continue
-        if 0 <= weekday <= 6:
-            out.add(weekday)
-    return out

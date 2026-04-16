@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections import deque
-from dataclasses import replace
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from core.indicator_engine import IndicatorConfig, IndicatorEngine
@@ -14,8 +12,9 @@ from core.models import MarketRegime, StrategyContext, StrategySignal
 from core.news_filter import NewsBlackoutFilter
 from core.regime_classifier import MarketRegimeClassifier
 from core.session_manager import SessionManager
-from core.signal_filter import SignalFilterPipeline
+from core.signal_processor import SignalProcessor
 from core.strategy_params import resolve_strategy_params
+from core.trading_mode import resolve_trading_mode
 from storage.memory_store import MemoryCandleStore
 from strategies.compression_breakout import CompressionBreakoutStrategy
 from strategies.liquidity_sweep import LiquiditySweepReversalStrategy
@@ -51,21 +50,13 @@ class SignalEngine:
         indicator_cfg = _build_indicator_config(params)
         self._indicator_engine = IndicatorEngine(config=indicator_cfg)
         self._regime_classifier = MarketRegimeClassifier.from_params(params)
-        self._signal_filter = SignalFilterPipeline(params=params)
+        self._signal_processor = SignalProcessor(params=params)
         self._blackout_filter = blackout_filter
         self._strategy_params_section = _strategy_params_section(params)
+        self._trading_mode = resolve_trading_mode(params).value
         self._strategy_classes = self._build_strategy_classes()
         self._strategy_cache: dict[tuple[str, str], Any] = {}
         self._max_eval_candles = int(params.get("max_eval_candles", 350))
-        signal_engine_cfg = params.get("signal_engine", {})
-        if not isinstance(signal_engine_cfg, dict):
-            signal_engine_cfg = {}
-        self._dedupe_history_limit = max(
-            1000,
-            int(signal_engine_cfg.get("dedupe_history_limit", 20_000)),
-        )
-        self._accepted_keys_set: set[tuple[str, str, str]] = set()
-        self._accepted_keys_queue: deque[tuple[str, str, str]] = deque()
 
     def process_candle(self, *, instrument: str, timeframe: str) -> EngineResult:
         if instrument not in self._registry:
@@ -115,37 +106,31 @@ class SignalEngine:
                 rejected_reasons.append(f"{strategy_name}:disabled")
                 continue
 
-            raw = strategy.evaluate(context)
-            if raw is None:
+            raw_signals = strategy.generate_signals(context)
+            if not raw_signals:
                 continue
 
-            decision = self._signal_filter.evaluate(raw, context)
-            if not decision.accepted:
-                rejected_reasons.append(f"{strategy_name}:{decision.reason}")
-                continue
-
-            accepted_signal = raw
-            if decision.enriched_metadata:
-                accepted_signal = replace(
-                    raw,
-                    metadata=dict(raw.metadata) | dict(decision.enriched_metadata),
-                )
-
-            dedupe_key = (
-                accepted_signal.instrument,
-                accepted_signal.strategy,
-                accepted_signal.timestamp.isoformat(),
+            processed = self._signal_processor.process_strategy_output(
+                strategy_name=strategy_name,
+                signals=raw_signals,
+                context=context,
             )
-            if dedupe_key in self._accepted_keys_set:
-                rejected_reasons.append(f"{strategy_name}:duplicate")
-                continue
-
-            self._accepted_keys_set.add(dedupe_key)
-            self._accepted_keys_queue.append(dedupe_key)
-            if len(self._accepted_keys_queue) > self._dedupe_history_limit:
-                oldest = self._accepted_keys_queue.popleft()
-                self._accepted_keys_set.discard(oldest)
-            accepted.append(accepted_signal)
+            for signal_obj in processed.accepted_signals:
+                accepted.append(
+                    replace(
+                        signal_obj,
+                        metadata=dict(signal_obj.metadata)
+                        | {
+                            "tick_size": float(instrument_meta.tick_size),
+                            "tick_value": float(instrument_meta.tick_value),
+                            "lot": int(instrument_meta.lot),
+                            "lot_size": int(instrument_meta.lot),
+                            "min_qty": 1.0,
+                            "qty_step": 1.0,
+                        },
+                    )
+                )
+            rejected_reasons.extend(processed.rejected_reasons)
 
         return EngineResult(
             regime=regime,
@@ -167,6 +152,7 @@ class SignalEngine:
             section=self._strategy_params_section,
             strategy_name=strategy_name,
             instrument_symbol=instrument,
+            trading_mode=self._trading_mode,
         )
         strategy = strategy_cls(params=params)
         self._strategy_cache[cache_key] = strategy
@@ -203,6 +189,7 @@ def _build_indicator_config(params: dict[str, Any]) -> IndicatorConfig:
     return IndicatorConfig(
         ema_fast=int(section.get("ema_fast", 20)),
         ema_slow=int(section.get("ema_slow", 50)),
+        ema_trend=int(section.get("ema_trend", 200)),
         atr_period=int(section.get("atr_period", 14)),
         volume_period=int(section.get("volume_period", 20)),
         slope_period=int(section.get("slope_period", 5)),

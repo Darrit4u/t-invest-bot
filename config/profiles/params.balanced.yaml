@@ -8,7 +8,6 @@ market_data:
     ES: 5200.0
     SILVER: 36.0
     BRENT: 84.0
-    NG: 2.6
 
 history_preload:
   enabled: true
@@ -129,30 +128,3 @@ strategy_params:
         tp2_r: 1.8
         use_mtf_filter: true
 
-    NG:
-      trend_pullback_vwap_ema:
-        enabled: true
-        blocked_entry_hours_local: []
-        tp1_r: 1
-        tp2_r: 2.2
-        confirmation_close_delta_atr: 0.02
-        use_mtf_filter: true
-        trend_timeframe: "1hour"
-        setup_timeframe: "15min"
-      compression_breakout:
-        enabled: true
-        range_min_atr: 0.55
-        range_max_atr: 2.4
-        breakout_body_min_atr: 0.22
-        breakout_volume_mult: 1.15
-        tp1_r: 1.1
-        tp2_r: 2.4
-      liquidity_sweep_reversal:
-        enabled: true
-        balance_crosses_vwap_min: 5
-        day_range_max_atr: 3.5
-        sweep_min_atr: 0.1
-        return_close_distance_atr: 0.18
-        tp1_r: 1
-        tp2_r: 1.8
-        use_mtf_filter: true

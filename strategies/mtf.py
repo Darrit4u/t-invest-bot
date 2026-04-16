@@ -17,6 +17,7 @@ _TIMEFRAME_TO_MINUTES = {
     "15min": 15,
     "30min": 30,
     "1hour": 60,
+    "4hour": 240,
 }
 
 
@@ -121,26 +122,30 @@ def _aggregate_timeframe(
         return []
 
     bucket_seconds = target_minutes * 60
+    bars_per_bucket = target_minutes // source_minutes
     items: list[Candle] = []
     current_bucket: int | None = None
     current: dict[str, Any] | None = None
+    current_count = 0
 
     for candle in candles:
         bucket = int(candle.datetime.timestamp()) // bucket_seconds
         if current_bucket is None or bucket != current_bucket:
             if current is not None:
-                items.append(
-                    Candle.validated(
-                        dt=current["dt"],
-                        open_=current["open"],
-                        high=current["high"],
-                        low=current["low"],
-                        close=current["close"],
-                        volume=current["volume"],
-                        instrument=current["instrument"],
-                        timeframe=target_timeframe,
+                # Use only fully formed higher-timeframe buckets to avoid lookahead.
+                if current_count >= bars_per_bucket:
+                    items.append(
+                        Candle.validated(
+                            dt=current["dt"],
+                            open_=current["open"],
+                            high=current["high"],
+                            low=current["low"],
+                            close=current["close"],
+                            volume=current["volume"],
+                            instrument=current["instrument"],
+                            timeframe=target_timeframe,
+                        )
                     )
-                )
             current_bucket = bucket
             current = {
                 "dt": candle.datetime,
@@ -151,6 +156,7 @@ def _aggregate_timeframe(
                 "volume": candle.volume,
                 "instrument": candle.instrument,
             }
+            current_count = 1
             continue
 
         assert current is not None
@@ -159,8 +165,9 @@ def _aggregate_timeframe(
         current["low"] = min(current["low"], candle.low)
         current["close"] = candle.close
         current["volume"] += candle.volume
+        current_count += 1
 
-    if current is not None:
+    if current is not None and current_count >= bars_per_bucket:
         items.append(
             Candle.validated(
                 dt=current["dt"],

@@ -1,30 +1,32 @@
-"""Backward-compatible exports for shared domain models."""
-
-from __future__ import annotations
+"""Domain package with explicit trading entities."""
 
 from domain.models import (
     IndicatorSnapshot,
-    Instrument as InstrumentMeta,
+    Instrument,
     MarketRegime,
     MarketRegimeState,
     Portfolio,
     Position,
-    Signal as StrategySignal,
+    Signal,
     SignalDecision,
     SignalDirection,
     StrategyContext,
+    StrategySignal,
     Trade,
 )
+from domain.strategy import Strategy
 
 __all__ = [
     "IndicatorSnapshot",
-    "InstrumentMeta",
+    "Instrument",
     "MarketRegime",
     "MarketRegimeState",
     "Portfolio",
     "Position",
+    "Signal",
     "SignalDecision",
     "SignalDirection",
+    "Strategy",
     "StrategyContext",
     "StrategySignal",
     "Trade",

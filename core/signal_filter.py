@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -12,6 +12,7 @@ from core.post_fill_validation import (
     expected_fill_price,
     validate_post_fill,
 )
+from core.trading_mode import should_enforce_session_filter
 
 
 class SignalFilterPipeline:
@@ -26,7 +27,13 @@ class SignalFilterPipeline:
         self._min_expected_edge_after_fees = float(self._cfg.get("min_expected_edge_after_fees", 0.0))
         self._min_signal_quality_score = float(self._cfg.get("min_signal_quality_score", 0.55))
         self._expected_open_slippage_atr = float(self._cfg.get("expected_open_slippage_atr", 0.03))
+        self._min_bar_volume_ratio = max(0.0, float(self._cfg.get("min_bar_volume_ratio", 0.0)))
         self._low_expectancy_hours_local = _parse_hours(self._cfg.get("low_expectancy_hours_local", []))
+        self._enforce_session_filter = should_enforce_session_filter(params)
+        futures_cfg = params.get("futures", {}) if isinstance(params.get("futures", {}), dict) else {}
+        self._block_near_expiry = _to_bool(futures_cfg.get("block_near_expiry", False), default=False)
+        self._expiry_buffer_days = max(0, int(futures_cfg.get("expiry_buffer_days", 3)))
+        self._expiry_by_symbol = _parse_expiry_dates(futures_cfg.get("expiries", {}))
         self._strategy_context_thresholds = {
             "trend_pullback_vwap_ema": float(self._cfg.get("trend_context_score_min", 0.52)),
             "compression_breakout": float(self._cfg.get("compression_context_score_min", 0.52)),
@@ -45,7 +52,7 @@ class SignalFilterPipeline:
         if not instrument.enabled:
             return self._reject(reason="instrument_disabled", reason_codes=("weak_context",))
 
-        if not context.session_active:
+        if self._enforce_session_filter and not context.session_active:
             return self._reject(reason="session_inactive", reason_codes=("bad_timing",))
 
         if context.blackout_active:
@@ -56,6 +63,12 @@ class SignalFilterPipeline:
                 reason="strategy_not_allowed_for_instrument",
                 reason_codes=("weak_context",),
             )
+
+        if self._block_near_expiry and self._is_near_expiry(symbol=signal.instrument, now=signal.timestamp):
+            return self._reject(reason="near_expiry_block", reason_codes=("futures_expiry",))
+
+        if self._is_low_liquidity(context=context):
+            return self._reject(reason="low_liquidity", reason_codes=("low_liquidity",))
 
         if not self._is_signal_shape_valid(signal):
             return self._reject(reason="invalid_signal_shape", reason_codes=("weak_structure",))
@@ -196,6 +209,19 @@ class SignalFilterPipeline:
             return 0.0, "bad_timing"
         return 1.0, None
 
+    def _is_near_expiry(self, *, symbol: str, now: datetime) -> bool:
+        expiry = self._expiry_by_symbol.get(symbol)
+        if expiry is None:
+            return False
+        return now.date() >= (expiry - _days(self._expiry_buffer_days))
+
+    def _is_low_liquidity(self, *, context: StrategyContext) -> bool:
+        if self._min_bar_volume_ratio <= 0.0:
+            return False
+        baseline = max(float(context.indicators.rolling_volume_avg), 1e-9)
+        last_volume = float(context.candles[-1].volume)
+        return last_volume < (baseline * self._min_bar_volume_ratio)
+
     def _enriched_common(
         self,
         *,
@@ -288,3 +314,40 @@ def _clamp01(value: float) -> float:
     if value >= 1.0:
         return 1.0
     return float(value)
+
+
+def _parse_expiry_dates(raw: Any) -> dict[str, date]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, date] = {}
+    for key, value in raw.items():
+        symbol = str(key).strip()
+        if not symbol:
+            continue
+        text = str(value).strip()
+        if not text:
+            continue
+        try:
+            out[symbol] = datetime.strptime(text, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+    return out
+
+
+def _days(value: int):
+    from datetime import timedelta
+
+    return timedelta(days=max(0, int(value)))
+
+
+def _to_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default

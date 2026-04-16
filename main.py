@@ -13,22 +13,24 @@ from pathlib import Path
 from typing import Any
 
 from core.config_loader import ConfigError, ConfigLoader
+from core.execution_engine import ExecutionEngine
 from core.history_preloader import preload_history
 from core.instrument_registry import InstrumentRegistry
 from core.logger_setup import setup_logging
 from core.market_data import Candle, CandleValidationError, create_market_data_client
 from core.news_filter import NewsBlackoutFilter
+from core.portfolio_engine import PortfolioEngine
 from core.session_manager import SessionManager
 from core.signal_engine import SignalEngine
 from core.stats_engine import StatsEngine
 from core.telegram_notifier import TelegramConfig, TelegramNotifier
+from core.trading_mode import resolve_primary_timeframe, resolve_trading_mode
 from core.trade_simulator import TradeSimulator
 from storage.memory_store import MemoryCandleStore
 from storage.sqlite_store import SQLiteStore
 
 
 LOGGER = logging.getLogger("app")
-CLOSE_EVENTS = {"tp2_hit", "sl_hit", "expired", "cancelled_by_news", "cancelled_by_session_end"}
 
 
 def parse_args() -> argparse.Namespace:
@@ -168,6 +170,8 @@ async def run() -> int:
         logger=logging.getLogger("trade_simulator"),
         storage=sqlite_store,
     )
+    execution_engine = ExecutionEngine(simulator=trade_simulator)
+    portfolio_engine = PortfolioEngine(params=app_config.params)
 
     signal_engine = SignalEngine(
         registry=registry,
@@ -199,6 +203,11 @@ async def run() -> int:
             return
 
     mode = resolve_market_data_mode(app_config.params)
+    trading_mode = resolve_trading_mode(app_config.params)
+    runtime_timeframe = resolve_primary_timeframe(
+        params=app_config.params,
+        default_timeframe=app_config.default_timeframe,
+    )
     market_data_params = app_config.params.get("market_data", {})
     if not isinstance(market_data_params, dict):
         market_data_params = {}
@@ -219,7 +228,7 @@ async def run() -> int:
                 registry=registry,
                 store=store,
                 params=app_config.params,
-                timeframe=app_config.default_timeframe,
+                timeframe=runtime_timeframe,
                 logger=LOGGER,
             )
             if preload_report.enabled:
@@ -241,12 +250,12 @@ async def run() -> int:
         token=token,
         registry=registry,
         params=market_data_params,
-        timeframe=app_config.default_timeframe,
+        timeframe=runtime_timeframe,
         logger=logging.getLogger("market_data"),
         status_handler=on_market_data_status,
     )
 
-    LOGGER.info("Market data mode: %s", mode)
+    LOGGER.info("Market data mode: %s | trading mode: %s | timeframe: %s", mode, trading_mode.value, runtime_timeframe)
 
     if notifier.enabled and notifier.send_startup_message:
         await notifier.notify_text(
@@ -298,17 +307,39 @@ async def run() -> int:
         for signal_obj in engine_result.accepted_signals:
             await safe_db_write("save_signal", sqlite_store.save_signal, signal_obj)
             stats_engine.record_signal(instrument=signal_obj.instrument, strategy=signal_obj.strategy)
-            registration_events = trade_simulator.register_signal(signal_obj, timeframe=candle.timeframe)
-            for event in registration_events:
-                stats_engine.record_event(event)
-                trade_for_event = trade_simulator.get_trade(event.trade_id)
-                if event.event_type != "new_signal":
-                    await notifier.notify_trade_event(event, trade_for_event)
 
-            await notifier.notify_signal(signal_obj)
+        selection = portfolio_engine.select_signals(
+            signals=engine_result.accepted_signals,
+            open_positions=execution_engine.positions(),
+        )
+        for event in selection.events:
+            stats_engine.record_portfolio_event(event)
+            if event.event_type in {"risk_rejected", "allocation_rejected"}:
+                await notifier.notify_portfolio_event(event)
 
+        for rejection in selection.rejected:
             LOGGER.info(
-                "Signal accepted | instrument=%s strategy=%s regime=%s direction=%s entry=%.5f sl=%.5f tp1=%.5f tp2=%.5f meta=%s",
+                "Portfolio rejected signal | instrument=%s strategy=%s reason=%s details=%s",
+                rejection.signal.instrument,
+                rejection.signal.strategy,
+                rejection.reason,
+                rejection.details,
+            )
+
+        execution_open = portfolio_engine.submit_for_execution(
+            signals=selection.accepted_signals,
+            execution_engine=execution_engine,
+            timeframe=candle.timeframe,
+        )
+        for event in execution_open.portfolio_events:
+            stats_engine.record_portfolio_event(event)
+            if event.event_type in {"position_opened", "position_closed", "trade_closed"}:
+                await notifier.notify_portfolio_event(event)
+
+        for signal_obj in selection.accepted_signals:
+            await notifier.notify_signal(signal_obj)
+            LOGGER.info(
+                "Signal approved | instrument=%s strategy=%s regime=%s direction=%s entry=%.5f sl=%.5f tp1=%.5f tp2=%.5f meta=%s",
                 signal_obj.instrument,
                 signal_obj.strategy,
                 signal_obj.regime.value,
@@ -325,7 +356,7 @@ async def run() -> int:
         blackout_active, blackout_reason = blackout_filter.is_blocked(candle.datetime)
 
         try:
-            trade_events = trade_simulator.process_candle(
+            process_result = execution_engine.process_market(
                 candle=candle,
                 session_active=session_state.is_active,
                 blackout_active=blackout_active,
@@ -336,12 +367,16 @@ async def run() -> int:
             await notifier.notify_critical("Trade simulator failure", str(exc))
             return
 
-        for event in trade_events:
-            stats_engine.record_event(event)
-            trade = trade_simulator.get_trade(event.trade_id)
-            await notifier.notify_trade_event(event, trade)
-            if event.event_type in CLOSE_EVENTS and trade is not None:
-                stats_engine.record_trade_closed(trade)
+        normalized_events = portfolio_engine.normalize_execution_events(
+            execution_events=process_result.events,
+            execution_engine=execution_engine,
+        )
+        for normalized in normalized_events:
+            stats_engine.record_portfolio_event(normalized)
+            if normalized.event_type in {"position_opened", "position_closed", "trade_closed"}:
+                await notifier.notify_portfolio_event(normalized)
+        for trade in process_result.closed_trades:
+            stats_engine.record_trade_closed(trade)
 
         if updates_seen % max(1, args.print_every) == 0:
             recent = store.get_recent(candle.instrument, candle.timeframe, limit=3)
@@ -363,7 +398,7 @@ async def run() -> int:
                 candle.timeframe,
                 engine_result.regime.value if engine_result.regime else "N/A",
                 len(engine_result.rejected_reasons),
-                trade_simulator.open_trades_count(),
+                execution_engine.open_positions_count(),
                 int(summary["closed"]),
                 float(summary["net_pnl"]),
                 rows,
@@ -383,9 +418,14 @@ async def run() -> int:
                         timeout=notifier.summary_interval_seconds,
                     )
                 except asyncio.TimeoutError:
+                    summary_payload = _with_portfolio_risk_snapshot(
+                        summary=stats_engine.summary(),
+                        portfolio_engine=portfolio_engine,
+                        execution_engine=execution_engine,
+                    )
                     await notifier.notify_daily_summary(
-                        stats_engine.summary(),
-                        trade_simulator.open_trades_count(),
+                        summary_payload,
+                        execution_engine.open_positions_count(),
                     )
 
         tasks.append(asyncio.create_task(_summary_loop(), name="telegram-summary"))
@@ -431,7 +471,11 @@ async def run() -> int:
     if pending:
         await asyncio.gather(*pending, return_exceptions=True)
 
-    stats_summary = stats_engine.summary()
+    stats_summary = _with_portfolio_risk_snapshot(
+        summary=stats_engine.summary(),
+        portfolio_engine=portfolio_engine,
+        execution_engine=execution_engine,
+    )
     await safe_db_write("save_stats_snapshot", sqlite_store.save_stats_snapshot, datetime.now(tz=timezone.utc), stats_summary)
     sqlite_store.close()
 
@@ -446,7 +490,7 @@ async def run() -> int:
     LOGGER.info("Final stats summary: %s", stats_summary)
 
     if notifier.enabled and notifier.send_shutdown_summary:
-        await notifier.notify_daily_summary(stats_summary, trade_simulator.open_trades_count())
+        await notifier.notify_daily_summary(stats_summary, execution_engine.open_positions_count())
 
     with contextlib.suppress(Exception):
         await notifier.close()
@@ -457,6 +501,28 @@ async def run() -> int:
 def main() -> None:
     exit_code = asyncio.run(run())
     raise SystemExit(exit_code)
+
+
+def _with_portfolio_risk_snapshot(
+    *,
+    summary: dict[str, Any],
+    portfolio_engine: PortfolioEngine,
+    execution_engine: ExecutionEngine,
+) -> dict[str, Any]:
+    payload = dict(summary)
+    exposure = portfolio_engine.risk_manager.current_exposure(open_positions=execution_engine.positions())
+    account_size = max(portfolio_engine.risk_manager.config.account_size, 1e-9)
+    payload["portfolio_risk_snapshot"] = {
+        "open_positions": exposure.total_positions,
+        "total_risk_money": exposure.total_risk_money,
+        "total_risk_pct": exposure.total_risk_pct,
+        "risk_by_instrument": dict(exposure.risk_by_instrument),
+        "risk_by_strategy": dict(exposure.risk_by_strategy),
+        "risk_by_group": {
+            key: (value / account_size) * 100.0 for key, value in exposure.risk_money_by_group.items()
+        },
+    }
+    return payload
 
 
 if __name__ == "__main__":

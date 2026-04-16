@@ -35,6 +35,7 @@ _TIMEFRAME_TO_MINUTES = {
     "15min": 15,
     "30min": 30,
     "1hour": 60,
+    "4hour": 240,
 }
 
 _TIMEFRAME_TO_CANDLE_INTERVAL_ATTR = {
@@ -46,6 +47,7 @@ _TIMEFRAME_TO_CANDLE_INTERVAL_ATTR = {
     "15min": "CANDLE_INTERVAL_15_MIN",
     "30min": "CANDLE_INTERVAL_30_MIN",
     "1hour": "CANDLE_INTERVAL_HOUR",
+    "4hour": "CANDLE_INTERVAL_4_HOUR",
 }
 
 
@@ -196,6 +198,7 @@ def estimate_required_bars(*, params: dict[str, Any], timeframe: str) -> int:
     indicator_cfg = params.get("indicator_engine", {})
     if not isinstance(indicator_cfg, dict):
         indicator_cfg = {}
+    ema_trend = int(indicator_cfg.get("ema_trend", 200))
     atr_period = int(indicator_cfg.get("atr_period", 14))
     volume_period = int(indicator_cfg.get("volume_period", 20))
     slope_period = int(indicator_cfg.get("slope_period", 5))
@@ -203,6 +206,7 @@ def estimate_required_bars(*, params: dict[str, Any], timeframe: str) -> int:
     swing_window = int(indicator_cfg.get("swing_window", 5))
     crossing_lookback = int(indicator_cfg.get("crossing_lookback", 30))
     indicator_need = max(
+        ema_trend + 2,
         atr_period + 2,
         volume_period + 2,
         slope_period + 2,

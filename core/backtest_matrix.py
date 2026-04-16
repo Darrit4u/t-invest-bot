@@ -14,14 +14,18 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from core.config_loader import AppConfig
+from core.execution_engine import ExecutionEngine
 from core.history_preloader import estimate_required_bars
 from core.instrument_registry import InstrumentRegistry
 from core.market_data import Candle, CandleValidationError, _load_tinvest_sdk, _quotation_to_float
+from core.models import Trade
 from core.news_filter import NewsBlackoutFilter
+from core.portfolio_engine import PortfolioEngine
+from core.portfolio_events import PortfolioEvent
 from core.session_manager import SessionManager
 from core.signal_engine import SignalEngine
 from core.stats_engine import StatsEngine
-from core.trade_simulator import SimulatedTrade, TradeEvent, TradeSimulator
+from core.trade_simulator import TradeEvent, TradeSimulator
 from storage.memory_store import MemoryCandleStore
 
 
@@ -53,9 +57,6 @@ _TIMEFRAME_TO_CANDLE_INTERVAL_ATTR = {
     "1hour": "CANDLE_INTERVAL_HOUR",
 }
 
-_CLOSE_EVENTS = {"tp2_hit", "sl_hit", "expired", "cancelled_by_news", "cancelled_by_session_end"}
-
-
 @dataclass(frozen=True, slots=True)
 class ComboTask:
     profile: str
@@ -74,6 +75,18 @@ class ComboRunResult:
     signals: list[dict[str, Any]]
     trades: list[dict[str, Any]]
     events: list[dict[str, Any]]
+
+
+@dataclass(slots=True)
+class PortfolioRunResult:
+    profile: str
+    status: str
+    error: str | None
+    metrics: dict[str, Any]
+    signals: list[dict[str, Any]]
+    trades: list[dict[str, Any]]
+    events: list[dict[str, Any]]
+    portfolio_events: list[dict[str, Any]]
 
 
 class _NullLogger:
@@ -293,6 +306,8 @@ def run_combo_backtest(
         logger=_NullLogger(),
     )
     trade_simulator = TradeSimulator(params=params, logger=_NullLogger(), storage=None)
+    execution_engine = ExecutionEngine(simulator=trade_simulator)
+    portfolio_engine = PortfolioEngine(params=params)
     stats_engine = StatsEngine()
     session_manager = SessionManager()
 
@@ -307,53 +322,69 @@ def run_combo_backtest(
         if candle.datetime > report_end_utc:
             break
 
-        if trade_simulator.open_trades_count() == 0:
+        if execution_engine.open_positions_count() == 0:
             result = signal_engine.process_candle(instrument=task.instrument, timeframe=timeframe)
             for signal in result.accepted_signals:
                 if signal.timestamp < report_start_utc or signal.timestamp > report_end_utc:
                     continue
 
                 stats_engine.record_signal(instrument=signal.instrument, strategy=signal.strategy)
-                registration_events = trade_simulator.register_signal(signal, timeframe=timeframe)
+                selection = portfolio_engine.select_signals(
+                    signals=[signal],
+                    open_positions=execution_engine.positions(),
+                )
+                for item in selection.events:
+                    stats_engine.record_portfolio_event(item)
+                if not selection.accepted_signals:
+                    continue
+                sized_signal = selection.accepted_signals[0]
+                open_result = execution_engine.open_from_signal(signal=sized_signal, timeframe=timeframe)
                 signal_rows.append(
                     {
                         "profile": task.profile,
                         "strategy": task.strategy,
                         "instrument": task.instrument,
-                        "signal_id": signal.signal_id,
-                        "timestamp": signal.timestamp.isoformat(),
-                        "regime": signal.regime.value,
-                        "direction": signal.direction.value,
-                        "entry_mode": signal.entry_mode,
-                        "entry": signal.entry,
-                        "stop_loss": signal.stop_loss,
-                        "tp1": signal.tp1,
-                        "tp2": signal.tp2,
-                        "metadata_json": json.dumps(signal.metadata, ensure_ascii=False),
+                        "signal_id": sized_signal.signal_id,
+                        "timestamp": sized_signal.timestamp.isoformat(),
+                        "regime": sized_signal.regime.value,
+                        "direction": sized_signal.direction.value,
+                        "entry_mode": sized_signal.entry_mode,
+                        "entry": sized_signal.entry,
+                        "stop_loss": sized_signal.stop_loss,
+                        "tp1": sized_signal.tp1,
+                        "tp2": sized_signal.tp2,
+                        "metadata_json": json.dumps(sized_signal.metadata, ensure_ascii=False),
                     }
                 )
-                for event in registration_events:
-                    stats_engine.record_event(event)
+                for event in open_result.events:
                     event_rows.append(_event_row(task=task, event=event))
+                for normalized in portfolio_engine.normalize_execution_events(
+                    execution_events=open_result.events,
+                    execution_engine=execution_engine,
+                ):
+                    stats_engine.record_portfolio_event(normalized)
                 break
 
         session_state = session_manager.get_state(selected_meta, candle.datetime)
         blackout_active, blackout_reason = blackout_filter.is_blocked(candle.datetime)
-        events = trade_simulator.process_candle(
+        process_result = execution_engine.process_market(
             candle=candle,
             session_active=session_state.is_active,
             blackout_active=blackout_active,
             blackout_reason=blackout_reason,
         )
-        for event in events:
-            stats_engine.record_event(event)
+        for event in process_result.events:
             event_rows.append(_event_row(task=task, event=event))
-            trade = trade_simulator.get_trade(event.trade_id)
-            if event.event_type in _CLOSE_EVENTS and trade is not None:
-                stats_engine.record_trade_closed(trade)
+        for normalized in portfolio_engine.normalize_execution_events(
+            execution_events=process_result.events,
+            execution_engine=execution_engine,
+        ):
+            stats_engine.record_portfolio_event(normalized)
+        for trade in process_result.closed_trades:
+            stats_engine.record_trade_closed(trade)
 
     timezone_name = str(app_config.params.get("timezone", "Europe/Moscow"))
-    all_trades = list(trade_simulator.trades())
+    all_trades = list(execution_engine.trade_records())
     trade_rows = [
         _trade_row(
             task=task,
@@ -391,7 +422,7 @@ def run_combo_backtest(
         "signals": int(summary_global.get("signals", 0)),
         "activated": int(summary_global.get("activated", 0)),
         "closed": closed,
-        "open_trades": trade_simulator.open_trades_count(),
+        "open_trades": execution_engine.open_positions_count(),
         "wins": wins,
         "losses": losses,
         "win_rate": win_rate,
@@ -440,6 +471,244 @@ def run_combo_backtest(
         signals=signal_rows,
         trades=trade_rows,
         events=event_rows,
+    )
+
+
+def run_portfolio_backtest(
+    *,
+    profile: str,
+    candles_by_instrument: dict[str, list[Candle]],
+    app_config: AppConfig,
+    params: dict[str, Any],
+    timeframe: str,
+    report_start_utc: datetime,
+    report_end_utc: datetime,
+    selected_instruments: list[str] | None = None,
+    selected_strategies: list[str] | None = None,
+) -> PortfolioRunResult:
+    full_registry = InstrumentRegistry.from_config(app_config)
+    instrument_set = set(selected_instruments or [item.symbol for item in full_registry.enabled()])
+    strategy_set = set(selected_strategies or [])
+
+    if not instrument_set:
+        return PortfolioRunResult(
+            profile=profile,
+            status="error",
+            error="no_instruments_selected",
+            metrics={},
+            signals=[],
+            trades=[],
+            events=[],
+            portfolio_events=[],
+        )
+
+    registry_items = {}
+    for symbol in sorted(instrument_set):
+        if symbol not in full_registry:
+            continue
+        if symbol not in candles_by_instrument:
+            continue
+
+        meta = full_registry.get(symbol)
+        if strategy_set:
+            filtered = tuple(item for item in meta.allowed_strategies if item in strategy_set)
+        else:
+            filtered = meta.allowed_strategies
+        if not filtered:
+            continue
+        registry_items[symbol] = replace(meta, allowed_strategies=filtered)
+
+    if not registry_items:
+        return PortfolioRunResult(
+            profile=profile,
+            status="error",
+            error="no_registry_items",
+            metrics={},
+            signals=[],
+            trades=[],
+            events=[],
+            portfolio_events=[],
+        )
+
+    registry = InstrumentRegistry(items=registry_items)
+    max_rows = max((len(candles_by_instrument.get(symbol, [])) for symbol in registry_items), default=0)
+    store = MemoryCandleStore(history_depth=max(app_config.history_depth, max_rows + 10))
+    blackout_filter = NewsBlackoutFilter(app_config.blackout_windows)
+    signal_engine = SignalEngine(
+        registry=registry,
+        store=store,
+        params=params,
+        blackout_filter=blackout_filter,
+        logger=_NullLogger(),
+    )
+    trade_simulator = TradeSimulator(params=params, logger=_NullLogger(), storage=None)
+    execution_engine = ExecutionEngine(simulator=trade_simulator)
+    portfolio_engine = PortfolioEngine(params=params)
+    stats_engine = StatsEngine()
+    session_manager = SessionManager()
+
+    signal_rows: list[dict[str, Any]] = []
+    event_rows: list[dict[str, Any]] = []
+    portfolio_event_rows: list[dict[str, Any]] = []
+
+    ordered_candles: list[Candle] = []
+    for symbol in sorted(registry_items):
+        ordered_candles.extend(candles_by_instrument.get(symbol, []))
+    ordered_candles.sort(key=lambda item: (item.datetime, item.instrument))
+
+    for candle in ordered_candles:
+        store.upsert(candle)
+        if candle.datetime < report_start_utc:
+            continue
+        if candle.datetime > report_end_utc:
+            break
+
+        signal_result = signal_engine.process_candle(instrument=candle.instrument, timeframe=timeframe)
+        for signal in signal_result.accepted_signals:
+            stats_engine.record_signal(instrument=signal.instrument, strategy=signal.strategy)
+            signal_rows.append(
+                {
+                    "profile": profile,
+                    "strategy": signal.strategy,
+                    "instrument": signal.instrument,
+                    "signal_id": signal.signal_id,
+                    "timestamp": signal.timestamp.isoformat(),
+                    "regime": signal.regime.value,
+                    "direction": signal.direction.value,
+                    "entry_mode": signal.entry_mode,
+                    "entry": signal.entry,
+                    "stop_loss": signal.stop_loss,
+                    "tp1": signal.tp1,
+                    "tp2": signal.tp2,
+                    "metadata_json": json.dumps(signal.metadata, ensure_ascii=False),
+                }
+            )
+
+        selection = portfolio_engine.select_signals(
+            signals=signal_result.accepted_signals,
+            open_positions=execution_engine.positions(),
+        )
+        for item in selection.events:
+            stats_engine.record_portfolio_event(item)
+            portfolio_event_rows.append(_portfolio_event_row(profile=profile, event=item))
+
+        execution_open = portfolio_engine.submit_for_execution(
+            signals=selection.accepted_signals,
+            execution_engine=execution_engine,
+            timeframe=timeframe,
+        )
+        for item in execution_open.portfolio_events:
+            stats_engine.record_portfolio_event(item)
+            portfolio_event_rows.append(_portfolio_event_row(profile=profile, event=item))
+        for event in execution_open.execution_events:
+            event_rows.append(_event_row_portfolio(profile=profile, event=event))
+
+        instrument_meta = registry.get(candle.instrument)
+        session_state = session_manager.get_state(instrument_meta, candle.datetime)
+        blackout_active, blackout_reason = blackout_filter.is_blocked(candle.datetime)
+        process_result = execution_engine.process_market(
+            candle=candle,
+            session_active=session_state.is_active,
+            blackout_active=blackout_active,
+            blackout_reason=blackout_reason,
+        )
+        for event in process_result.events:
+            event_rows.append(_event_row_portfolio(profile=profile, event=event))
+        for item in portfolio_engine.normalize_execution_events(
+            execution_events=process_result.events,
+            execution_engine=execution_engine,
+        ):
+            stats_engine.record_portfolio_event(item)
+            portfolio_event_rows.append(_portfolio_event_row(profile=profile, event=item))
+        for trade in process_result.closed_trades:
+            stats_engine.record_trade_closed(trade)
+
+    timezone_name = str(app_config.params.get("timezone", "Europe/Moscow"))
+    all_trades = list(execution_engine.trade_records())
+    trade_rows = [_trade_row_portfolio(profile=profile, trade=item, timezone_name=timezone_name) for item in all_trades]
+    closed_trades = [trade for trade in all_trades if trade.closed_at is not None]
+
+    point_stats = _point_stats(closed_trades)
+    trading_days = _trading_days_count(
+        candles=ordered_candles,
+        report_start_utc=report_start_utc,
+        report_end_utc=report_end_utc,
+        timezone_name=timezone_name,
+    )
+    trades_per_day = _trades_per_day(closed=len(closed_trades), trading_days=trading_days)
+    trade_breakdowns = _trade_breakdowns(
+        closed_trades=closed_trades,
+        timezone_name=timezone_name,
+    )
+    quality_analytics = _trade_quality_analytics(closed_trades=closed_trades)
+    exposure_by_instrument, exposure_by_strategy, exposure_by_group = _portfolio_exposure_breakdown(closed_trades)
+
+    summary_global = stats_engine.summary().get("global", {})
+    wins = int(summary_global.get("wins", 0))
+    losses = int(summary_global.get("losses", 0))
+    closed = int(summary_global.get("closed", 0))
+    win_rate = float(summary_global.get("win_rate", 0.0))
+    loss_rate = 1.0 - win_rate if closed > 0 else 0.0
+
+    metrics = {
+        "profile": profile,
+        "portfolio_mode": bool(portfolio_engine.enabled),
+        "signals": int(summary_global.get("signals", 0)),
+        "activated": int(summary_global.get("activated", 0)),
+        "closed": closed,
+        "open_trades": execution_engine.open_positions_count(),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "win_rate_pct": win_rate * 100.0,
+        "loss_rate_pct": loss_rate * 100.0,
+        "trading_days": trading_days,
+        "trades_per_day": trades_per_day,
+        "gross_pnl": float(summary_global.get("gross_pnl", 0.0)),
+        "net_pnl": float(summary_global.get("net_pnl", 0.0)),
+        "fees": float(summary_global.get("fees", 0.0)),
+        "expectancy": float(summary_global.get("expectancy", 0.0)),
+        "avg_r": float(summary_global.get("avg_r", 0.0)),
+        "profit_factor": float(summary_global.get("profit_factor", 0.0)),
+        "max_drawdown": float(summary_global.get("max_drawdown", 0.0)),
+        "tp1_hits": int(summary_global.get("tp1_hits", 0)),
+        "tp2_hits": int(summary_global.get("tp2_hits", 0)),
+        "sl_hits": int(summary_global.get("sl_hits", 0)),
+        "expired": int(summary_global.get("expired", 0)),
+        "cancelled_news": int(summary_global.get("cancelled_news", 0)),
+        "cancelled_session": int(summary_global.get("cancelled_session", 0)),
+        "avg_win_points": point_stats["avg_win_points"],
+        "avg_loss_points_abs": point_stats["avg_loss_points_abs"],
+        "gross_wins_points": point_stats["gross_wins_points"],
+        "gross_losses_points_abs": point_stats["gross_losses_points_abs"],
+        "long_closed": trade_breakdowns["long_closed"],
+        "short_closed": trade_breakdowns["short_closed"],
+        "hour_distribution": trade_breakdowns["hour_distribution"],
+        "weekday_distribution": trade_breakdowns["weekday_distribution"],
+        "exit_reason_breakdown": trade_breakdowns["exit_reason_breakdown"],
+        "entry_mode_breakdown": trade_breakdowns["entry_mode_breakdown"],
+        "reason_code_expectancy": quality_analytics["reason_code_expectancy"],
+        "setup_quality_expectancy": quality_analytics["setup_quality_expectancy"],
+        "signal_quality_expectancy": quality_analytics["signal_quality_expectancy"],
+        "exposure_by_instrument": exposure_by_instrument,
+        "exposure_by_strategy": exposure_by_strategy,
+        "exposure_by_group": exposure_by_group,
+        "portfolio_risk_reject_reasons": stats_engine.summary().get("portfolio", {}).get("risk_reject_reasons", {}),
+        "signals_rows": len(signal_rows),
+        "trades_rows": len(trade_rows),
+        "events_rows": len(event_rows),
+        "portfolio_events_rows": len(portfolio_event_rows),
+    }
+
+    return PortfolioRunResult(
+        profile=profile,
+        status="ok",
+        error=None,
+        metrics=metrics,
+        signals=signal_rows,
+        trades=trade_rows,
+        events=event_rows,
+        portfolio_events=portfolio_event_rows,
     )
 
 
@@ -614,9 +883,9 @@ def _map_history_interval(*, timeframe: str, candle_interval_cls: Any) -> Any:
     return getattr(candle_interval_cls, attr)
 
 
-def _trade_row(*, task: ComboTask, trade: SimulatedTrade, timezone_name: str) -> dict[str, Any]:
+def _trade_row(*, task: ComboTask, trade: Trade, timezone_name: str) -> dict[str, Any]:
     zone = ZoneInfo(timezone_name)
-    entry_time = trade.activated_at or trade.created_at
+    entry_time = trade.activated_at or trade.opened_at
     entry_local = entry_time.astimezone(zone)
     return {
         "profile": task.profile,
@@ -624,27 +893,30 @@ def _trade_row(*, task: ComboTask, trade: SimulatedTrade, timezone_name: str) ->
         "instrument": task.instrument,
         "trade_id": trade.trade_id,
         "signal_id": trade.signal_id,
-        "status": trade.status.value,
-        "direction": trade.direction.value,
-        "created_at": trade.created_at.isoformat(),
-        "activated_at": trade.activated_at.isoformat() if trade.activated_at else "",
+        "status": trade.status or "",
+        "direction": trade.side.value,
+        "created_at": (trade.created_at or trade.opened_at).isoformat(),
+        "activated_at": (trade.activated_at or trade.opened_at).isoformat(),
         "closed_at": trade.closed_at.isoformat() if trade.closed_at else "",
         "entry_hour_local": entry_local.hour,
         "entry_weekday_local": entry_local.weekday(),
         "entry_mode": str(trade.metadata.get("entry_mode", "")),
-        "entry": trade.entry,
-        "entry_fill_price": trade.entry_fill_price if trade.entry_fill_price is not None else "",
-        "stop_loss": trade.stop_loss,
-        "tp1": trade.tp1,
-        "tp2": trade.tp2,
-        "bars_waiting": trade.bars_waiting,
-        "bars_in_trade": trade.bars_in_trade,
-        "gross_pnl": trade.gross_pnl,
-        "net_pnl": trade.net_pnl,
-        "fees_paid": trade.fees_paid,
-        "r_multiple": trade.r_multiple,
+        "entry": trade.entry_price,
+        "entry_fill_price": trade.entry_fill_price if trade.entry_fill_price is not None else trade.entry_price,
+        "qty": trade.size,
+        "planned_risk_money": _as_float_or_default(trade.metadata.get("planned_risk_money"), 0.0),
+        "planned_risk_pct": _as_float_or_default(trade.metadata.get("planned_risk_pct"), 0.0),
+        "stop_loss": trade.metadata.get("stop_loss", ""),
+        "tp1": trade.metadata.get("tp1", ""),
+        "tp2": trade.metadata.get("tp2", ""),
+        "bars_waiting": trade.bars_waiting if trade.bars_waiting is not None else "",
+        "bars_in_trade": trade.bars_in_trade if trade.bars_in_trade is not None else "",
+        "gross_pnl": trade.gross_pnl if trade.gross_pnl is not None else trade.pnl,
+        "net_pnl": trade.pnl,
+        "fees_paid": trade.fees_paid if trade.fees_paid is not None else 0.0,
+        "r_multiple": trade.r_multiple if trade.r_multiple is not None else 0.0,
         "exit_reason": trade.exit_reason or "",
-        "remaining_qty": trade.remaining_qty,
+        "remaining_qty": trade.remaining_qty if trade.remaining_qty is not None else "",
         "metadata_json": json.dumps(trade.metadata, ensure_ascii=False),
     }
 
@@ -663,6 +935,112 @@ def _event_row(*, task: ComboTask, event: TradeEvent) -> dict[str, Any]:
         "size": event.size if event.size is not None else "",
         "payload_json": json.dumps(event.payload, ensure_ascii=False),
     }
+
+
+def _trade_row_portfolio(*, profile: str, trade: Trade, timezone_name: str) -> dict[str, Any]:
+    zone = ZoneInfo(timezone_name)
+    entry_time = trade.activated_at or trade.opened_at
+    entry_local = entry_time.astimezone(zone)
+    return {
+        "profile": profile,
+        "strategy": trade.strategy_id,
+        "instrument": trade.instrument,
+        "trade_id": trade.trade_id,
+        "signal_id": trade.signal_id,
+        "status": trade.status or "",
+        "direction": trade.side.value,
+        "created_at": (trade.created_at or trade.opened_at).isoformat(),
+        "activated_at": (trade.activated_at or trade.opened_at).isoformat(),
+        "closed_at": trade.closed_at.isoformat() if trade.closed_at else "",
+        "entry_hour_local": entry_local.hour,
+        "entry_weekday_local": entry_local.weekday(),
+        "entry_mode": str(trade.metadata.get("entry_mode", "")),
+        "entry": trade.entry_price,
+        "entry_fill_price": trade.entry_fill_price if trade.entry_fill_price is not None else trade.entry_price,
+        "qty": trade.size,
+        "planned_risk_money": _as_float_or_default(trade.metadata.get("planned_risk_money"), 0.0),
+        "planned_risk_pct": _as_float_or_default(trade.metadata.get("planned_risk_pct"), 0.0),
+        "stop_loss": trade.metadata.get("stop_loss", ""),
+        "tp1": trade.metadata.get("tp1", ""),
+        "tp2": trade.metadata.get("tp2", ""),
+        "bars_waiting": trade.bars_waiting if trade.bars_waiting is not None else "",
+        "bars_in_trade": trade.bars_in_trade if trade.bars_in_trade is not None else "",
+        "gross_pnl": trade.gross_pnl if trade.gross_pnl is not None else trade.pnl,
+        "net_pnl": trade.pnl,
+        "fees_paid": trade.fees_paid if trade.fees_paid is not None else 0.0,
+        "r_multiple": trade.r_multiple if trade.r_multiple is not None else 0.0,
+        "exit_reason": trade.exit_reason or "",
+        "remaining_qty": trade.remaining_qty if trade.remaining_qty is not None else "",
+        "metadata_json": json.dumps(trade.metadata, ensure_ascii=False),
+    }
+
+
+def _event_row_portfolio(*, profile: str, event: TradeEvent) -> dict[str, Any]:
+    return {
+        "profile": profile,
+        "strategy": event.strategy,
+        "instrument": event.instrument,
+        "trade_id": event.trade_id,
+        "signal_id": event.signal_id,
+        "event_type": event.event_type,
+        "status": event.status,
+        "event_time": event.event_time.isoformat(),
+        "price": event.price if event.price is not None else "",
+        "size": event.size if event.size is not None else "",
+        "payload_json": json.dumps(event.payload, ensure_ascii=False),
+    }
+
+
+def _portfolio_event_row(*, profile: str, event: PortfolioEvent) -> dict[str, Any]:
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    return {
+        "profile": profile,
+        "event_type": event.event_type,
+        "event_time": event.event_time.isoformat(),
+        "instrument": event.instrument or "",
+        "strategy": event.strategy or "",
+        "signal_id": event.signal_id or "",
+        "trade_id": event.trade_id or "",
+        "reason": event.reason or "",
+        "planned_risk_money": _as_float_or_default(payload.get("planned_risk_money"), 0.0),
+        "planned_risk_pct": _as_float_or_default(payload.get("planned_risk_pct"), 0.0),
+        "qty": _as_float_or_default(payload.get("qty", payload.get("position_qty")), 0.0),
+        "payload_json": json.dumps(event.payload, ensure_ascii=False),
+    }
+
+
+def _portfolio_exposure_breakdown(closed_trades: list[Trade]) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    by_instrument: dict[str, float] = {}
+    by_strategy: dict[str, float] = {}
+    by_group: dict[str, float] = {}
+    for trade in closed_trades:
+        raw = trade.metadata.get("planned_risk_money")
+        try:
+            risk_money = float(raw)
+        except (TypeError, ValueError):
+            raw_pct = trade.metadata.get("portfolio_risk_pct")
+            stop_loss = trade.metadata.get("stop_loss")
+            try:
+                stop = float(stop_loss)
+            except (TypeError, ValueError):
+                stop = trade.entry_price
+            risk_pct = abs(float(trade.entry_price) - stop) / max(abs(float(trade.entry_price)), 1e-9) * 100.0
+            try:
+                hinted_pct = float(raw_pct)
+            except (TypeError, ValueError):
+                hinted_pct = risk_pct
+            risk_money = abs(hinted_pct)
+
+        risk_money = max(0.0, risk_money)
+        by_instrument[trade.instrument] = by_instrument.get(trade.instrument, 0.0) + risk_money
+        by_strategy[trade.strategy_id] = by_strategy.get(trade.strategy_id, 0.0) + risk_money
+        group_name = str(trade.metadata.get("correlation_group", "ungrouped")).strip() or "ungrouped"
+        by_group[group_name] = by_group.get(group_name, 0.0) + risk_money
+
+    sorted_instrument = dict(sorted(by_instrument.items(), key=lambda row: row[0]))
+    sorted_strategy = dict(sorted(by_strategy.items(), key=lambda row: row[0]))
+    sorted_group = dict(sorted(by_group.items(), key=lambda row: row[0]))
+    return sorted_instrument, sorted_strategy, sorted_group
 
 
 def _trading_days_count(
@@ -685,7 +1063,7 @@ def _trades_per_day(*, closed: int, trading_days: int) -> float:
     return float(closed) / float(max(1, trading_days))
 
 
-def _trade_breakdowns(*, closed_trades: list[SimulatedTrade], timezone_name: str) -> dict[str, Any]:
+def _trade_breakdowns(*, closed_trades: list[Trade], timezone_name: str) -> dict[str, Any]:
     zone = ZoneInfo(timezone_name)
     long_closed = 0
     short_closed = 0
@@ -695,13 +1073,12 @@ def _trade_breakdowns(*, closed_trades: list[SimulatedTrade], timezone_name: str
     entry_mode_counter: Counter[str] = Counter()
 
     for trade in closed_trades:
-        if trade.direction.value == "LONG":
+        if trade.side.value == "LONG":
             long_closed += 1
         else:
             short_closed += 1
 
-        entry_time = trade.activated_at or trade.created_at
-        local_entry = entry_time.astimezone(zone)
+        local_entry = trade.opened_at.astimezone(zone)
         hour_counter[local_entry.hour] += 1
         weekday_counter[local_entry.weekday()] += 1
 
@@ -727,9 +1104,9 @@ def _trade_breakdowns(*, closed_trades: list[SimulatedTrade], timezone_name: str
     }
 
 
-def _point_stats(trades: list[SimulatedTrade]) -> dict[str, float]:
-    wins = [item.net_pnl for item in trades if item.net_pnl >= 0]
-    losses = [item.net_pnl for item in trades if item.net_pnl < 0]
+def _point_stats(trades: list[Trade]) -> dict[str, float]:
+    wins = [item.pnl for item in trades if item.pnl >= 0]
+    losses = [item.pnl for item in trades if item.pnl < 0]
     gross_wins = float(sum(wins))
     gross_losses_abs = float(sum(abs(item) for item in losses))
     return {
@@ -740,13 +1117,13 @@ def _point_stats(trades: list[SimulatedTrade]) -> dict[str, float]:
     }
 
 
-def _trade_quality_analytics(*, closed_trades: list[SimulatedTrade]) -> dict[str, dict[str, dict[str, Any]]]:
+def _trade_quality_analytics(*, closed_trades: list[Trade]) -> dict[str, dict[str, dict[str, Any]]]:
     reason_groups: dict[str, list[float]] = {}
     setup_quality_groups: dict[str, list[float]] = {}
     signal_quality_groups: dict[str, list[float]] = {}
 
     for trade in closed_trades:
-        value = float(trade.net_pnl)
+        value = float(trade.pnl)
         reasons = _extract_reason_codes(trade.metadata)
         if not reasons:
             reasons = ("none",)
@@ -874,3 +1251,10 @@ def _signal_bucket_sort_key(value: str) -> tuple[int, str]:
 
 def _reason_sort_key(value: str) -> str:
     return value
+
+
+def _as_float_or_default(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default

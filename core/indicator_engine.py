@@ -18,6 +18,7 @@ class IndicatorConfig:
 
     ema_fast: int = 20
     ema_slow: int = 50
+    ema_trend: int = 200
     atr_period: int = 14
     volume_period: int = 20
     slope_period: int = 5
@@ -68,6 +69,7 @@ class IndicatorEngine:
 
         frame["ema_fast"] = frame["close"].ewm(span=self._config.ema_fast, adjust=False).mean()
         frame["ema_slow"] = frame["close"].ewm(span=self._config.ema_slow, adjust=False).mean()
+        frame["ema_trend"] = frame["close"].ewm(span=self._config.ema_trend, adjust=False).mean()
 
         prev_close = frame["close"].shift(1)
         tr_a = frame["high"] - frame["low"]
@@ -121,6 +123,7 @@ class IndicatorEngine:
             swing_high=float(swing_slice["high"].max()),
             swing_low=float(swing_slice["low"].min()),
             extra={
+                "ema_trend": float(last["ema_trend"]),
                 "recent_high": float(frame["high"].tail(20).max()),
                 "recent_low": float(frame["low"].tail(20).min()),
                 "recent_close": float(last["close"]),
