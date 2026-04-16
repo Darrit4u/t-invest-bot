@@ -41,6 +41,69 @@ class TradeEdgeCaseTests(unittest.TestCase):
         assert trade is not None
         self.assertAlmostEqual(trade.entry_fill_price, 100.3, places=6)
 
+    def test_non_next_bar_modes_also_wait_for_next_bar(self) -> None:
+        sim = TradeSimulator(params={"trade_simulator": {}}, logger=_DummyLogger(), storage=None)
+        signal = build_signal(
+            direction=SignalDirection.LONG,
+            entry=100,
+            stop_loss=99,
+            tp1=101,
+            tp2=102,
+            entry_mode="BREAKOUT_CLOSE",
+        )
+        events = sim.register_signal(signal, timeframe="1min")
+        trade_id = events[0].trade_id
+
+        same_candle = make_candle(0, open_=99.9, high=100.4, low=99.7, close=100.2)
+        out_same = sim.process_candle(
+            candle=same_candle,
+            session_active=True,
+            blackout_active=False,
+            blackout_reason=None,
+        )
+        self.assertEqual(out_same, tuple())
+
+        next_candle = make_candle(1, open_=100.2, high=100.5, low=100.0, close=100.4)
+        out_next = sim.process_candle(
+            candle=next_candle,
+            session_active=True,
+            blackout_active=False,
+            blackout_reason=None,
+        )
+        self.assertEqual([e.event_type for e in out_next], ["activated"])
+        trade = sim.get_trade(trade_id)
+        assert trade is not None
+        self.assertAlmostEqual(trade.entry_fill_price, 100.0, places=6)
+
+    def test_execution_fill_model_can_force_conservative_next_bar_open(self) -> None:
+        sim = TradeSimulator(
+            params={"execution": {"fill_model": "conservative_next_bar_open"}},
+            logger=_DummyLogger(),
+            storage=None,
+        )
+        signal = build_signal(
+            direction=SignalDirection.LONG,
+            entry=100,
+            stop_loss=99,
+            tp1=101,
+            tp2=102,
+            entry_mode="BREAKOUT_CLOSE",
+        )
+        events = sim.register_signal(signal, timeframe="1hour")
+        trade_id = events[0].trade_id
+
+        next_candle = make_candle(1, open_=100.2, high=100.5, low=100.0, close=100.4, timeframe="1hour")
+        out = sim.process_candle(
+            candle=next_candle,
+            session_active=True,
+            blackout_active=False,
+            blackout_reason=None,
+        )
+        self.assertEqual([e.event_type for e in out], ["activated"])
+        trade = sim.get_trade(trade_id)
+        assert trade is not None
+        self.assertAlmostEqual(trade.entry_fill_price, 100.2, places=6)
+
     def test_duplicate_and_partial_candles_update_store(self) -> None:
         store = MemoryCandleStore(history_depth=20)
         c1 = make_candle(0, open_=100, close=100.2, instrument="ES")
@@ -76,6 +139,40 @@ class TradeEdgeCaseTests(unittest.TestCase):
         sim.process_candle(candle=activate, session_active=True, blackout_active=False, blackout_reason=None)
         gap_down = make_candle(2, open_=98.2, high=98.6, low=97.9, close=98.3)
         events = sim.process_candle(candle=gap_down, session_active=True, blackout_active=False, blackout_reason=None)
+        self.assertEqual([e.event_type for e in events], ["sl_hit"])
+
+    def test_execution_gap_risk_handling_applies_conservative_open_exit_in_intraday(self) -> None:
+        sim = TradeSimulator(
+            params={"execution": {"gap_risk_handling": "conservative"}},
+            logger=_DummyLogger(),
+            storage=None,
+        )
+        signal = build_signal(direction=SignalDirection.LONG, entry=100, stop_loss=99, tp1=101, tp2=102)
+        sim.register_signal(signal, timeframe="1min")
+
+        activate = make_candle(1, open_=100.0, high=100.2, low=99.8, close=100.0)
+        sim.process_candle(candle=activate, session_active=True, blackout_active=False, blackout_reason=None)
+        gap_down = make_candle(2, open_=98.2, high=98.6, low=97.9, close=98.3)
+        events = sim.process_candle(candle=gap_down, session_active=True, blackout_active=False, blackout_reason=None)
+        self.assertEqual([e.event_type for e in events], ["sl_hit"])
+        self.assertAlmostEqual(float(events[0].price or 0.0), 98.2, places=6)
+
+    def test_execution_intrabar_conflict_policy_overrides_legacy_setting(self) -> None:
+        sim = TradeSimulator(
+            params={
+                "trade_simulator": {"intrabar_stop_priority": False},
+                "execution": {"intrabar_conflict_policy": "pessimistic_stop_priority"},
+            },
+            logger=_DummyLogger(),
+            storage=None,
+        )
+        signal = build_signal(direction=SignalDirection.LONG, entry=100, stop_loss=99, tp1=101, tp2=102)
+        sim.register_signal(signal, timeframe="1hour")
+
+        activate = make_candle(1, open_=100.0, high=100.2, low=99.8, close=100.0, timeframe="1hour")
+        sim.process_candle(candle=activate, session_active=True, blackout_active=False, blackout_reason=None)
+        conflict = make_candle(2, open_=100.0, high=101.5, low=98.8, close=100.6, timeframe="1hour")
+        events = sim.process_candle(candle=conflict, session_active=True, blackout_active=False, blackout_reason=None)
         self.assertEqual([e.event_type for e in events], ["sl_hit"])
 
     def test_gap_through_tp_hits_tp2(self) -> None:
@@ -124,7 +221,11 @@ class TradeEdgeCaseTests(unittest.TestCase):
         self.assertEqual(trade.status, TradeStatus.CANCELLED_BY_NEWS)
 
     def test_session_end_during_active_trade_cancels(self) -> None:
-        sim = TradeSimulator(params={"trade_simulator": {}}, logger=_DummyLogger(), storage=None)
+        sim = TradeSimulator(
+            params={"trading": {"mode": "intraday"}, "trade_simulator": {}},
+            logger=_DummyLogger(),
+            storage=None,
+        )
         signal = build_signal(direction=SignalDirection.SHORT, entry=100, stop_loss=101, tp1=99, tp2=98)
         events = sim.register_signal(signal, timeframe="1min")
         trade_id = events[0].trade_id
@@ -141,7 +242,10 @@ class TradeEdgeCaseTests(unittest.TestCase):
 
     def test_session_end_closes_only_profitable_when_configured(self) -> None:
         sim = TradeSimulator(
-            params={"trade_simulator": {"close_profitable_on_session_end": True}},
+            params={
+                "trading": {"mode": "intraday"},
+                "trade_simulator": {"close_profitable_on_session_end": True},
+            },
             logger=_DummyLogger(),
             storage=None,
         )
@@ -166,7 +270,10 @@ class TradeEdgeCaseTests(unittest.TestCase):
 
     def test_session_end_keeps_loser_open_when_configured(self) -> None:
         sim = TradeSimulator(
-            params={"trade_simulator": {"close_profitable_on_session_end": True}},
+            params={
+                "trading": {"mode": "intraday"},
+                "trade_simulator": {"close_profitable_on_session_end": True},
+            },
             logger=_DummyLogger(),
             storage=None,
         )

@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 
 from core.models import MarketRegime, SignalDirection
@@ -148,6 +149,23 @@ class TradeSimulatorUnitTests(unittest.TestCase):
         assert trade is not None
         self.assertEqual(trade.status, TradeStatus.EXPIRED)
         self.assertEqual(trade.exit_reason, "low_expected_edge")
+
+    def test_register_signal_uses_sized_quantity_from_metadata(self) -> None:
+        signal = build_signal(
+            regime=MarketRegime.TREND,
+            strategy="trend_pullback_vwap_ema",
+            direction=SignalDirection.LONG,
+            entry=100.0,
+            stop_loss=99.0,
+            tp1=101.0,
+            tp2=102.0,
+        )
+        signal = replace(signal, metadata={"source": "test", "position_qty": 7.0, "tick_size": 0.01})
+        events = self.sim.register_signal(signal, timeframe="1min")
+        trade = self.sim.get_trade(events[0].trade_id)
+        assert trade is not None
+        self.assertAlmostEqual(trade.quantity, 7.0, places=6)
+        self.assertAlmostEqual(trade.remaining_qty, 7.0, places=6)
 
 
 if __name__ == "__main__":

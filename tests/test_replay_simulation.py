@@ -145,7 +145,7 @@ class ReplaySimulationTests(unittest.TestCase):
         self.assertEqual(trade.status, TradeStatus.CANCELLED_BY_NEWS)
 
     def test_replay_session_end_closure_during_active_trade(self) -> None:
-        sim = TradeSimulator(params={"trade_simulator": {}}, logger=_DummyLogger(), storage=None)
+        sim = TradeSimulator(params={"trade_simulator": {}, "trading": {"mode": "intraday"}}, logger=_DummyLogger(), storage=None)
         signal = build_signal(entry=100, stop_loss=99, tp1=101, tp2=102)
         events = sim.register_signal(signal, timeframe="1min")
         trade_id = events[0].trade_id
