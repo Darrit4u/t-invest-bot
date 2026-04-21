@@ -1,6 +1,7 @@
 timezone: Europe/Moscow
 market_data:
   mode: t_invest
+  wait_for_close: true
   reconnect_delay_seconds: 5
   candle_interval_seconds: 1
   base_prices:
@@ -20,6 +21,8 @@ trading:
 runtime:
   mode: server_paper
   polling_interval_sec: 30
+  debug_pipeline: true
+  debug_pipeline_every_updates: 25
   heartbeat_enabled: true
   heartbeat_interval_min: 180
   daily_report_enabled: true

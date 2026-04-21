@@ -54,6 +54,29 @@ class _SilentLogger:
         return None
 
 
+class _SequenceMarketData:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    async def get_candles(self, **kwargs):  # noqa: ARG002
+        idx = min(self.calls, max(0, len(self._responses) - 1))
+        self.calls += 1
+        return _FakeResponse(self._responses[idx])
+
+
+class _SequenceAsyncClient:
+    def __init__(self, token: str, market_data):
+        self.token = token
+        self.market_data = market_data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):  # noqa: ANN001, ARG002
+        return False
+
+
 class HistoryPreloaderTests(unittest.IsolatedAsyncioTestCase):
     async def test_preload_history_inserts_candles_into_store(self) -> None:
         meta = replace(build_instrument_meta(symbol="ES"), uid="test-uid")
@@ -94,6 +117,70 @@ class HistoryPreloaderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(report.enabled)
         self.assertGreaterEqual(report.inserted, 3)
         self.assertEqual(report.instruments_with_data, 1)
+        self.assertIsNotNone(store.latest("ES", "5min"))
+
+    async def test_preload_history_expands_lookback_until_target_or_max_available(self) -> None:
+        meta = replace(build_instrument_meta(symbol="ES"), uid="test-uid")
+        registry = InstrumentRegistry(items={"ES": meta})
+        store = MemoryCandleStore(history_depth=500)
+        now = datetime.now(tz=timezone.utc).replace(second=0, microsecond=0)
+
+        short_rows = [
+            _FakeCandle(
+                now - timedelta(minutes=(50 - i) * 5),
+                100.0 + i * 0.1,
+                100.2 + i * 0.1,
+                99.8 + i * 0.1,
+                100.1 + i * 0.1,
+                1000.0 + i,
+            )
+            for i in range(10)
+        ]
+        long_rows = [
+            _FakeCandle(
+                now - timedelta(minutes=(70 - i) * 5),
+                99.0 + i * 0.1,
+                99.3 + i * 0.1,
+                98.7 + i * 0.1,
+                99.1 + i * 0.1,
+                900.0 + i,
+            )
+            for i in range(70)
+        ]
+        sequence_market_data = _SequenceMarketData([short_rows, long_rows])
+
+        class _Interval:
+            CANDLE_INTERVAL_5_MIN = object()
+
+        sdk = {
+            "AsyncClient": lambda token: _SequenceAsyncClient(token=token, market_data=sequence_market_data),
+            "CandleInterval": _Interval,
+        }
+        params = {
+            "history_preload": {
+                "enabled": True,
+                "bars": 50,
+                "extra_bars": 0,
+                "max_fetch_rounds": 3,
+                "lookback_start_multiplier": 1.0,
+                "lookback_growth_factor": 2.0,
+                "max_lookback_multiplier": 4.0,
+            }
+        }
+
+        with patch("core.history_preloader._load_tinvest_sdk", return_value=sdk):
+            report = await preload_history(
+                token="test-token",
+                registry=registry,
+                store=store,
+                params=params,
+                timeframe="5min",
+                logger=_SilentLogger(),
+            )
+
+        self.assertTrue(report.enabled)
+        self.assertGreaterEqual(report.processed_candles, 50)
+        self.assertGreaterEqual(sequence_market_data.calls, 2)
         self.assertIsNotNone(store.latest("ES", "5min"))
 
     def test_estimate_required_bars_accounts_for_mtf(self) -> None:

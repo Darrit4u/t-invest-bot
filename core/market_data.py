@@ -175,6 +175,7 @@ class TInvestMarketDataClient(BaseMarketDataClient):
         token: str,
         instruments: tuple[InstrumentMeta, ...],
         timeframe: str,
+        wait_for_close: bool,
         reconnect_delay_seconds: float,
         logger: logging.Logger,
         status_handler: StatusHandler | None = None,
@@ -183,6 +184,7 @@ class TInvestMarketDataClient(BaseMarketDataClient):
         self._token = token
         self._instruments = instruments
         self._timeframe = timeframe
+        self._wait_for_close = wait_for_close
         self._reconnect_delay_seconds = max(reconnect_delay_seconds, 1.0)
 
     async def run(self, on_candle: CandleHandler, stop_event: asyncio.Event) -> None:
@@ -328,7 +330,7 @@ class TInvestMarketDataClient(BaseMarketDataClient):
                     subscribe_candles_request=subscribe_candles_request(
                         subscription_action=subscription_action.SUBSCRIPTION_ACTION_SUBSCRIBE,
                         instruments=instruments_for_subscribe,
-                        waiting_close=False,
+                        waiting_close=self._wait_for_close,
                     )
                 )
                 protobuf_request = grpc_helpers.dataclass_to_protobuff(
@@ -517,10 +519,12 @@ def create_market_data_client(
     enabled = registry.enabled()
     if mode == "t_invest":
         reconnect_delay_seconds = float(params.get("reconnect_delay_seconds", 5.0))
+        wait_for_close = _to_bool(params.get("wait_for_close", True), default=True)
         return TInvestMarketDataClient(
             token=token,
             instruments=enabled,
             timeframe=timeframe,
+            wait_for_close=wait_for_close,
             reconnect_delay_seconds=reconnect_delay_seconds,
             logger=logger,
             status_handler=status_handler,
@@ -539,3 +543,16 @@ def create_market_data_client(
         logger=logger,
         status_handler=status_handler,
     )
+
+
+def _to_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default

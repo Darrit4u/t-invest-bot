@@ -28,6 +28,9 @@ class EngineResult:
     regime: MarketRegime | None
     accepted_signals: tuple[StrategySignal, ...]
     rejected_reasons: tuple[str, ...]
+    bars_seen: int = 0
+    raw_signals: int = 0
+    filter_rejected: int = 0
 
 
 class SignalEngine:
@@ -65,14 +68,14 @@ class SignalEngine:
         instrument_meta = self._registry.get(instrument)
         candles = self._store.get_recent(instrument, timeframe, limit=self._max_eval_candles)
         if len(candles) < 18:
-            return EngineResult(None, tuple(), tuple())
+            return EngineResult(None, tuple(), tuple(), bars_seen=len(candles))
 
         snapshot = self._indicator_engine.snapshot(
             candles,
             session_timezone=self._session_manager.primary_timezone(instrument_meta),
         )
         if snapshot is None:
-            return EngineResult(None, tuple(), tuple())
+            return EngineResult(None, tuple(), tuple(), bars_seen=len(candles))
 
         regime_state = self._regime_classifier.classify_state(snapshot)
         regime = regime_state.dominant
@@ -94,6 +97,8 @@ class SignalEngine:
 
         accepted: list[StrategySignal] = []
         rejected_reasons: list[str] = []
+        raw_signals_total = 0
+        filter_rejected = 0
 
         for strategy_name in instrument_meta.allowed_strategies:
             strategy = self._resolve_strategy(
@@ -106,15 +111,18 @@ class SignalEngine:
                 rejected_reasons.append(f"{strategy_name}:disabled")
                 continue
 
-            raw_signals = strategy.generate_signals(context)
-            if not raw_signals:
+            strategy_raw_signals = strategy.generate_signals(context)
+            raw_signals_count = len(strategy_raw_signals)
+            raw_signals_total += raw_signals_count
+            if raw_signals_count == 0:
                 continue
 
             processed = self._signal_processor.process_strategy_output(
                 strategy_name=strategy_name,
-                signals=raw_signals,
+                signals=strategy_raw_signals,
                 context=context,
             )
+            filter_rejected += len(processed.rejected_reasons)
             for signal_obj in processed.accepted_signals:
                 accepted.append(
                     replace(
@@ -136,6 +144,9 @@ class SignalEngine:
             regime=regime,
             accepted_signals=tuple(accepted),
             rejected_reasons=tuple(rejected_reasons),
+            bars_seen=len(candles),
+            raw_signals=raw_signals_total,
+            filter_rejected=filter_rejected,
         )
 
     def _resolve_strategy(self, *, instrument: str, strategy_name: str) -> Any | None:

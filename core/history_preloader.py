@@ -106,13 +106,19 @@ async def preload_history(
     bars_override = int(cfg.get("bars", 0))
     required = bars_override if bars_override > 0 else estimate_required_bars(params=params, timeframe=timeframe)
     extra = max(0, int(cfg.get("extra_bars", 30)))
-    requested_bars = max(50, required + extra)
+    requested_bars = max(1, required + (0 if bars_override > 0 else extra))
     limit_multiplier = max(1, int(cfg.get("request_limit_multiplier", 3)))
+    lookback_start_multiplier = max(1.0, float(cfg.get("lookback_start_multiplier", 1.5)))
+    lookback_growth_factor = max(1.1, float(cfg.get("lookback_growth_factor", 2.0)))
+    max_lookback_multiplier = max(
+        lookback_start_multiplier,
+        float(cfg.get("max_lookback_multiplier", 64.0)),
+    )
+    max_fetch_rounds = max(1, int(cfg.get("max_fetch_rounds", 8)))
 
     interval = _map_candle_interval(timeframe=timeframe, candle_interval_cls=sdk["CandleInterval"])
     minutes = _TIMEFRAME_TO_MINUTES.get(timeframe.lower().strip(), 5)
     to_dt = datetime.now(tz=timezone.utc)
-    from_dt = to_dt - timedelta(minutes=int(requested_bars * minutes * 1.5))
 
     async_client = sdk["AsyncClient"]
     processed = 0
@@ -134,12 +140,18 @@ async def preload_history(
 
             attempted += 1
             try:
-                response = await client.market_data.get_candles(
+                rows = await _fetch_max_available_rows(
+                    client=client,
                     instrument_id=instrument_id,
                     interval=interval,
-                    from_=from_dt,
-                    to=to_dt,
-                    limit=requested_bars * limit_multiplier,
+                    to_dt=to_dt,
+                    minutes=minutes,
+                    requested_bars=requested_bars,
+                    limit_multiplier=limit_multiplier,
+                    lookback_start_multiplier=lookback_start_multiplier,
+                    lookback_growth_factor=lookback_growth_factor,
+                    max_lookback_multiplier=max_lookback_multiplier,
+                    max_fetch_rounds=max_fetch_rounds,
                 )
             except Exception as exc:
                 logger.warning(
@@ -149,9 +161,15 @@ async def preload_history(
                 )
                 continue
 
-            rows = list(getattr(response, "candles", []) or [])
             if not rows:
                 continue
+            if len(rows) < requested_bars:
+                logger.warning(
+                    "History preload partial instrument=%s bars=%d requested=%d (using max available)",
+                    instrument.symbol,
+                    len(rows),
+                    requested_bars,
+                )
             with_data += 1
             for row in rows:
                 try:
@@ -287,6 +305,68 @@ def _map_candle_interval(*, timeframe: str, candle_interval_cls: Any) -> Any:
     if attr is None or not hasattr(candle_interval_cls, attr):
         raise ValueError(f"Unsupported historical timeframe: {timeframe}")
     return getattr(candle_interval_cls, attr)
+
+
+async def _fetch_max_available_rows(
+    *,
+    client: Any,
+    instrument_id: str,
+    interval: Any,
+    to_dt: datetime,
+    minutes: int,
+    requested_bars: int,
+    limit_multiplier: int,
+    lookback_start_multiplier: float,
+    lookback_growth_factor: float,
+    max_lookback_multiplier: float,
+    max_fetch_rounds: int,
+) -> list[Any]:
+    unique_by_ts: dict[str, Any] = {}
+    lookback_multiplier = lookback_start_multiplier
+    max_limit = max(50, int(requested_bars * limit_multiplier))
+
+    for _ in range(max_fetch_rounds):
+        from_dt = to_dt - timedelta(minutes=int(requested_bars * minutes * lookback_multiplier))
+        response = await client.market_data.get_candles(
+            instrument_id=instrument_id,
+            interval=interval,
+            from_=from_dt,
+            to=to_dt,
+            limit=max_limit,
+        )
+        rows = list(getattr(response, "candles", []) or [])
+        before = len(unique_by_ts)
+        for row in rows:
+            dt = getattr(row, "time", None)
+            if dt is None:
+                continue
+            key = _dt_key(dt)
+            unique_by_ts[key] = row
+
+        if len(unique_by_ts) >= requested_bars:
+            break
+        if lookback_multiplier >= max_lookback_multiplier and len(unique_by_ts) == before:
+            break
+        if lookback_multiplier >= max_lookback_multiplier:
+            break
+        lookback_multiplier = min(max_lookback_multiplier, lookback_multiplier * lookback_growth_factor)
+
+    rows_out = sorted(
+        unique_by_ts.values(),
+        key=lambda item: _dt_key(getattr(item, "time", None)),
+    )
+    if len(rows_out) > requested_bars:
+        return rows_out[-requested_bars:]
+    return rows_out
+
+
+def _dt_key(value: Any) -> str:
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).isoformat()
+    return str(value)
 
 
 def _as_bool(value: Any) -> bool:

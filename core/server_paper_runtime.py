@@ -46,6 +46,8 @@ class ServerRuntimeConfig:
     dedup_enabled: bool
     restart_recovery_enabled: bool
     weekly_report_enabled: bool
+    debug_pipeline: bool = False
+    debug_pipeline_every_updates: int = 50
 
     @classmethod
     def from_params(cls, params: dict[str, Any]) -> "ServerRuntimeConfig":
@@ -64,6 +66,8 @@ class ServerRuntimeConfig:
             dedup_enabled=_to_bool(section.get("dedup_enabled", True), default=True),
             restart_recovery_enabled=_to_bool(section.get("restart_recovery_enabled", True), default=True),
             weekly_report_enabled=_to_bool(section.get("weekly_report_enabled", False), default=False),
+            debug_pipeline=_to_bool(section.get("debug_pipeline", False), default=False),
+            debug_pipeline_every_updates=max(1, int(section.get("debug_pipeline_every_updates", 50))),
         )
 
     @property
@@ -247,6 +251,18 @@ class ServerPaperRuntime:
         for signal_obj in selection.accepted_signals:
             await self._notify_signal_once(signal_obj)
 
+        self._maybe_log_pipeline_debug(
+            candle=candle,
+            engine_result=engine_result,
+            engine_accepted=len(engine_result.accepted_signals),
+            dedup_accepted=len(accepted_signals),
+            portfolio_accepted=len(selection.accepted_signals),
+            portfolio_rejected=len(selection.rejected),
+            executed=len(execution_open.opened_positions),
+            filter_reasons=engine_result.rejected_reasons,
+            portfolio_reasons=tuple(item.reason for item in selection.rejected),
+        )
+
         instrument_meta = self._registry.get(candle.instrument)
         session_state = self._session_manager.get_state(instrument_meta, candle.datetime)
         blackout_active, blackout_reason = self._blackout_filter.is_blocked(candle.datetime)
@@ -341,6 +357,49 @@ class ServerPaperRuntime:
                 continue
             accepted.append(signal_obj)
         return tuple(accepted)
+
+    def _maybe_log_pipeline_debug(
+        self,
+        *,
+        candle: Candle,
+        engine_result: Any,
+        engine_accepted: int,
+        dedup_accepted: int,
+        portfolio_accepted: int,
+        portfolio_rejected: int,
+        executed: int,
+        filter_reasons: tuple[str, ...],
+        portfolio_reasons: tuple[str, ...],
+    ) -> None:
+        if not self._runtime_config.debug_pipeline:
+            return
+        should_log = (
+            (self._updates_seen % self._runtime_config.debug_pipeline_every_updates) == 0
+            or engine_result.raw_signals > 0
+            or portfolio_rejected > 0
+            or portfolio_accepted > 0
+            or executed > 0
+        )
+        if not should_log:
+            return
+        LOGGER.info(
+            "Pipeline debug instrument=%s timeframe=%s bar=%s bars_seen=%d raw=%d "
+            "filter_rejected=%d engine_accepted=%d dedup_dropped=%d portfolio_rejected=%d "
+            "portfolio_accepted=%d executed=%d filter_reasons=%s portfolio_reasons=%s",
+            candle.instrument,
+            candle.timeframe,
+            candle.datetime.isoformat(),
+            int(getattr(engine_result, "bars_seen", 0)),
+            int(getattr(engine_result, "raw_signals", 0)),
+            int(getattr(engine_result, "filter_rejected", 0)),
+            engine_accepted,
+            max(0, engine_accepted - dedup_accepted),
+            portfolio_rejected,
+            portfolio_accepted,
+            executed,
+            list(filter_reasons[:5]),
+            list(portfolio_reasons[:5]),
+        )
 
     async def _notify_signal_once(self, signal_obj: Any) -> None:
         key = f"signal:{signal_obj.instrument}:{signal_obj.strategy}:{signal_obj.timestamp.isoformat()}"
