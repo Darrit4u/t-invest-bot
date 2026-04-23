@@ -25,6 +25,7 @@ from core.portfolio_events import PortfolioEvent
 from core.session_manager import SessionManager
 from core.signal_engine import SignalEngine
 from core.stats_engine import StatsEngine
+from core.timeframes import map_tinvest_history_interval, supported_timeframes, timeframe_minutes
 from core.trade_simulator import TradeEvent, TradeSimulator
 from storage.memory_store import MemoryCandleStore
 
@@ -34,28 +35,6 @@ DEFAULT_STRATEGIES = (
     "compression_breakout",
     "liquidity_sweep_reversal",
 )
-
-_TIMEFRAME_TO_MINUTES = {
-    "1min": 1,
-    "2min": 2,
-    "3min": 3,
-    "5min": 5,
-    "10min": 10,
-    "15min": 15,
-    "30min": 30,
-    "1hour": 60,
-}
-
-_TIMEFRAME_TO_CANDLE_INTERVAL_ATTR = {
-    "1min": "CANDLE_INTERVAL_1_MIN",
-    "2min": "CANDLE_INTERVAL_2_MIN",
-    "3min": "CANDLE_INTERVAL_3_MIN",
-    "5min": "CANDLE_INTERVAL_5_MIN",
-    "10min": "CANDLE_INTERVAL_10_MIN",
-    "15min": "CANDLE_INTERVAL_15_MIN",
-    "30min": "CANDLE_INTERVAL_30_MIN",
-    "1hour": "CANDLE_INTERVAL_HOUR",
-}
 
 @dataclass(frozen=True, slots=True)
 class ComboTask:
@@ -130,11 +109,12 @@ def split_csv_items(value: str) -> list[str]:
 
 
 def timeframe_delta(timeframe: str) -> timedelta:
-    minutes = _TIMEFRAME_TO_MINUTES.get(timeframe.lower().strip())
-    if minutes is None:
+    try:
+        minutes = timeframe_minutes(timeframe)
+    except ValueError as exc:
         raise ValueError(
-            f"Unsupported timeframe {timeframe!r}. Supported: {', '.join(sorted(_TIMEFRAME_TO_MINUTES))}"
-        )
+            f"Unsupported timeframe {timeframe!r}. Supported: {', '.join(sorted(supported_timeframes()))}"
+        ) from exc
     return timedelta(minutes=minutes)
 
 
@@ -877,10 +857,10 @@ def default_json_payload(
 
 
 def _map_history_interval(*, timeframe: str, candle_interval_cls: Any) -> Any:
-    attr = _TIMEFRAME_TO_CANDLE_INTERVAL_ATTR.get(timeframe.lower().strip())
-    if attr is None or not hasattr(candle_interval_cls, attr):
-        raise ValueError(f"Unsupported historical timeframe: {timeframe}")
-    return getattr(candle_interval_cls, attr)
+    return map_tinvest_history_interval(
+        timeframe=timeframe,
+        candle_interval_cls=candle_interval_cls,
+    )
 
 
 def _trade_row(*, task: ComboTask, trade: Trade, timezone_name: str) -> dict[str, Any]:

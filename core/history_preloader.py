@@ -9,6 +9,7 @@ from typing import Any
 from core.instrument_registry import InstrumentRegistry
 from core.market_data import Candle, CandleValidationError, _load_tinvest_sdk, _quotation_to_float
 from core.strategy_params import iter_strategy_param_variants
+from core.timeframes import map_tinvest_history_interval, timeframe_minutes
 from storage.memory_store import MemoryCandleStore
 
 
@@ -24,31 +25,6 @@ class PreloadReport:
     ignored: int
     instruments_attempted: int
     instruments_with_data: int
-
-
-_TIMEFRAME_TO_MINUTES = {
-    "1min": 1,
-    "2min": 2,
-    "3min": 3,
-    "5min": 5,
-    "10min": 10,
-    "15min": 15,
-    "30min": 30,
-    "1hour": 60,
-    "4hour": 240,
-}
-
-_TIMEFRAME_TO_CANDLE_INTERVAL_ATTR = {
-    "1min": "CANDLE_INTERVAL_1_MIN",
-    "2min": "CANDLE_INTERVAL_2_MIN",
-    "3min": "CANDLE_INTERVAL_3_MIN",
-    "5min": "CANDLE_INTERVAL_5_MIN",
-    "10min": "CANDLE_INTERVAL_10_MIN",
-    "15min": "CANDLE_INTERVAL_15_MIN",
-    "30min": "CANDLE_INTERVAL_30_MIN",
-    "1hour": "CANDLE_INTERVAL_HOUR",
-    "4hour": "CANDLE_INTERVAL_4_HOUR",
-}
 
 
 async def preload_history(
@@ -117,7 +93,7 @@ async def preload_history(
     max_fetch_rounds = max(1, int(cfg.get("max_fetch_rounds", 8)))
 
     interval = _map_candle_interval(timeframe=timeframe, candle_interval_cls=sdk["CandleInterval"])
-    minutes = _TIMEFRAME_TO_MINUTES.get(timeframe.lower().strip(), 5)
+    minutes = timeframe_minutes(timeframe)
     to_dt = datetime.now(tz=timezone.utc)
 
     async_client = sdk["AsyncClient"]
@@ -271,7 +247,7 @@ def estimate_required_bars(*, params: dict[str, Any], timeframe: str) -> int:
 def _estimate_mtf_source_bars(*, strategy_cfg: dict[str, Any], timeframe: str) -> int:
     if not _as_bool(strategy_cfg.get("use_mtf_filter", False)):
         return 0
-    source = _TIMEFRAME_TO_MINUTES.get(timeframe.lower().strip())
+    source = _timeframe_minutes_or_none(timeframe)
     if source is None or source <= 0:
         return 0
     slow = int(strategy_cfg.get("mtf_slow_ema", 6))
@@ -294,17 +270,17 @@ def _max_mtf_source_bars(*, variants: tuple[dict[str, Any], ...], timeframe: str
 
 
 def _ratio(*, source: int, target_tf: str) -> int:
-    target = _TIMEFRAME_TO_MINUTES.get(target_tf.lower().strip())
+    target = _timeframe_minutes_or_none(target_tf)
     if target is None or target < source or target % source != 0:
         return 0
     return target // source
 
 
 def _map_candle_interval(*, timeframe: str, candle_interval_cls: Any) -> Any:
-    attr = _TIMEFRAME_TO_CANDLE_INTERVAL_ATTR.get(timeframe.lower().strip())
-    if attr is None or not hasattr(candle_interval_cls, attr):
-        raise ValueError(f"Unsupported historical timeframe: {timeframe}")
-    return getattr(candle_interval_cls, attr)
+    return map_tinvest_history_interval(
+        timeframe=timeframe,
+        candle_interval_cls=candle_interval_cls,
+    )
 
 
 async def _fetch_max_available_rows(
@@ -373,3 +349,10 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _timeframe_minutes_or_none(timeframe: str) -> int | None:
+    try:
+        return timeframe_minutes(timeframe)
+    except ValueError:
+        return None

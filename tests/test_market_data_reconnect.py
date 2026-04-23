@@ -6,11 +6,18 @@ from unittest.mock import patch
 
 from core.config_loader import ConfigLoader
 from core.instrument_registry import InstrumentRegistry
-from core.market_data import Candle, create_market_data_client
+from core.market_data import Candle, _map_timeframe, create_market_data_client
 from tests.helpers import config_dir
 
 
 class MarketDataReconnectTests(unittest.IsolatedAsyncioTestCase):
+    def test_live_timeframe_mapping_supports_4hour(self) -> None:
+        class _SubscriptionInterval:
+            SUBSCRIPTION_INTERVAL_4_HOUR = object()
+
+        value = _map_timeframe("4hour", _SubscriptionInterval)
+        self.assertIs(value, _SubscriptionInterval.SUBSCRIPTION_INTERVAL_4_HOUR)
+
     async def test_disconnect_status_emitted_when_stream_cancelled(self) -> None:
         cfg = ConfigLoader(config_dir()).load()
         registry = InstrumentRegistry.from_config(cfg)

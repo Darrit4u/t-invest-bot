@@ -131,6 +131,37 @@ class ConfigLoaderTests(unittest.TestCase):
             with self.assertRaises(ConfigError):
                 ConfigLoader(root).load()
 
+    def test_default_timeframe_4hour_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "instruments.yaml").write_text(
+                """
+                history_depth: 100
+                default_timeframe: "4hour"
+                session_rules:
+                  A:
+                    timezone: "UTC"
+                    start: "00:00"
+                    end: "23:59"
+                instruments:
+                  ES:
+                    enabled: true
+                    tick_size: 0.25
+                    tick_value: 12.5
+                    lot: 1
+                    sessions: [A]
+                """,
+                encoding="utf-8",
+            )
+            (root / "strategies.yaml").write_text(
+                "strategies:\n  ES: [trend_pullback_vwap_ema]\n",
+                encoding="utf-8",
+            )
+            (root / "params.yaml").write_text("{}\n", encoding="utf-8")
+
+            cfg = ConfigLoader(root).load()
+            self.assertEqual(cfg.default_timeframe, "4hour")
+
 
 if __name__ == "__main__":
     unittest.main()

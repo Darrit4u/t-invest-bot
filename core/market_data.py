@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 from core.instrument_registry import InstrumentMeta, InstrumentRegistry
+from core.timeframes import map_tinvest_subscription_interval
 
 
 CandleHandler = Callable[["Candle"], Awaitable[None]]
@@ -435,24 +436,10 @@ async def _single_request_iterator(*, request: Any):
 
 
 def _map_timeframe(timeframe: str, subscription_interval_cls: Any) -> Any:
-    normalized = timeframe.lower().strip()
-    mapping = {
-        "1min": "SUBSCRIPTION_INTERVAL_ONE_MINUTE",
-        "2min": "SUBSCRIPTION_INTERVAL_2_MIN",
-        "3min": "SUBSCRIPTION_INTERVAL_3_MIN",
-        "5min": "SUBSCRIPTION_INTERVAL_FIVE_MINUTES",
-        "10min": "SUBSCRIPTION_INTERVAL_10_MIN",
-        "15min": "SUBSCRIPTION_INTERVAL_FIFTEEN_MINUTES",
-        "30min": "SUBSCRIPTION_INTERVAL_30_MIN",
-        "1hour": "SUBSCRIPTION_INTERVAL_ONE_HOUR",
-    }
-    attr_name = mapping.get(normalized)
-    if attr_name is None:
-        raise ValueError(
-            "Unsupported timeframe "
-            f"{timeframe!r}. Supported values: {', '.join(sorted(mapping.keys()))}"
-        )
-    return getattr(subscription_interval_cls, attr_name)
+    return map_tinvest_subscription_interval(
+        timeframe=timeframe,
+        subscription_interval_cls=subscription_interval_cls,
+    )
 
 
 def _quotation_to_float(value: Any) -> float:

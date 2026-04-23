@@ -1,18 +1,30 @@
 from __future__ import annotations
 
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from core.backtest_matrix import (
     ComboRunResult,
+    _map_history_interval,
     aggregate_profile_metrics,
     build_combo_tasks,
     build_russian_report,
     parse_local_datetime,
+    timeframe_delta,
 )
 
 
 class BacktestMatrixUtilsTests(unittest.TestCase):
+    def test_timeframe_delta_supports_4hour(self) -> None:
+        self.assertEqual(timeframe_delta("4hour"), timedelta(hours=4))
+
+    def test_history_interval_mapping_supports_4hour(self) -> None:
+        class _Interval:
+            CANDLE_INTERVAL_4_HOUR = object()
+
+        value = _map_history_interval(timeframe="4hour", candle_interval_cls=_Interval)
+        self.assertIs(value, _Interval.CANDLE_INTERVAL_4_HOUR)
+
     def test_parse_local_datetime_supports_date_and_time(self) -> None:
         start = parse_local_datetime("2026-01-05", timezone_name="Europe/Moscow", is_end=False)
         end = parse_local_datetime("2026-01-05", timezone_name="Europe/Moscow", is_end=True)

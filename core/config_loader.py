@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from core.timeframes import supported_timeframes
+
 
 class ConfigError(ValueError):
     """Raised when configuration files are missing or invalid."""
@@ -87,10 +89,10 @@ class ConfigLoader:
         default_timeframe = str(instruments_raw.get("default_timeframe", "1min"))
         if not default_timeframe:
             raise ConfigError("default_timeframe must not be empty")
-        if default_timeframe.lower() not in _SUPPORTED_TIMEFRAMES:
+        if default_timeframe.lower() not in supported_timeframes():
             raise ConfigError(
                 "default_timeframe must be one of: "
-                + ", ".join(sorted(_SUPPORTED_TIMEFRAMES))
+                + ", ".join(sorted(supported_timeframes()))
             )
 
         session_rules = self._parse_sessions(instruments_raw.get("session_rules", {}))
@@ -284,17 +286,3 @@ class ConfigLoader:
         normalized = str(value).strip()
         return normalized or None
 
-
-_SUPPORTED_TIMEFRAMES = frozenset(
-    {
-        "1min",
-        "2min",
-        "3min",
-        "5min",
-        "10min",
-        "15min",
-        "30min",
-        "1hour",
-        "4hour",
-    }
-)

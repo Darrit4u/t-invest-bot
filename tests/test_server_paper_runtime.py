@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
-from core.config_loader import ConfigLoader
+from core.config_loader import ConfigError, ConfigLoader
 from core.execution_engine import ExecutionEngine
 from core.instrument_registry import InstrumentRegistry
 from core.news_filter import NewsBlackoutFilter
 from core.portfolio_engine import PortfolioEngine
-from core.server_paper_runtime import ServerPaperRuntime, ServerRuntimeConfig, _format_daily_report_messages
+from core.server_paper_runtime import (
+    ServerPaperRuntime,
+    ServerRuntimeConfig,
+    _format_daily_report_messages,
+    run_server_paper,
+)
 from core.session_manager import SessionManager
 from core.signal_engine import SignalEngine
 from core.stats_engine import StatsEngine
@@ -116,6 +122,61 @@ def _build_runtime(*, sqlite_store: SQLiteStore, notifier: _StubNotifier) -> Ser
 
 
 class ServerPaperRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def test_runtime_config_rejects_invalid_timezone(self) -> None:
+        with self.assertRaises(ConfigError) as exc_ctx:
+            ServerRuntimeConfig.from_params({"runtime": {"timezone": "Mars/Phobos"}})
+        self.assertIn("runtime.timezone", str(exc_ctx.exception))
+
+    async def test_run_server_paper_returns_config_error_for_invalid_runtime_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            config_dir = root / "config"
+            log_dir = root / "logs"
+            config_dir.mkdir(parents=True, exist_ok=True)
+
+            (config_dir / "instruments.yaml").write_text(
+                """
+                history_depth: 100
+                default_timeframe: "1min"
+                session_rules:
+                  A:
+                    timezone: "UTC"
+                    start: "00:00"
+                    end: "23:59"
+                instruments:
+                  ES:
+                    enabled: true
+                    tick_size: 0.25
+                    tick_value: 12.5
+                    lot: 1
+                    sessions: [A]
+                """,
+                encoding="utf-8",
+            )
+            (config_dir / "strategies.yaml").write_text(
+                "strategies:\n  ES: [trend_pullback_vwap_ema]\n",
+                encoding="utf-8",
+            )
+            (config_dir / "params.yaml").write_text(
+                """
+                runtime:
+                  timezone: "Mars/Phobos"
+                telegram:
+                  enabled: false
+                """,
+                encoding="utf-8",
+            )
+
+            result = await run_server_paper(
+                config_dir=config_dir,
+                log_dir=log_dir,
+                run_seconds=0,
+                print_every=10,
+            )
+            logging.shutdown()
+            self.assertEqual(result.exit_code, 2)
+            self.assertEqual(result.reason, "config_error")
+
     async def test_idempotent_candle_checkpoint_survives_restart(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db = SQLiteStore(Path(td) / "runtime_state.db")

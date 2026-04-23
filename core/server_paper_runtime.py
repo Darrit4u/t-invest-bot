@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from core.config_loader import ConfigError, ConfigLoader
 from core.execution_engine import ExecutionEngine
@@ -55,6 +55,10 @@ class ServerRuntimeConfig:
         if not isinstance(section, dict):
             section = {}
         tz_name = str(section.get("timezone", params.get("timezone", "Europe/Moscow"))).strip() or "Europe/Moscow"
+        try:
+            ZoneInfo(tz_name)
+        except ZoneInfoNotFoundError as exc:
+            raise ConfigError(f"Invalid runtime.timezone: {tz_name}") from exc
         return cls(
             mode=str(section.get("mode", "server_paper")).strip() or "server_paper",
             polling_interval_sec=max(5, int(section.get("polling_interval_sec", 30))),
@@ -637,18 +641,21 @@ async def run_server_paper(
     LOGGER.info("Server paper runtime start")
     _load_env_file(Path(__file__).resolve().parents[1] / ".env")
 
+    app_config = None
     try:
         app_config = ConfigLoader(config_dir).load()
+        runtime_cfg = ServerRuntimeConfig.from_params(app_config.params)
     except ConfigError as exc:
         LOGGER.critical("Configuration error: %s", exc)
-        notifier = await _build_notifier({})
+        notifier_params: dict[str, Any] = {}
+        if app_config is not None:
+            notifier_params = app_config.params
+        notifier = await _build_notifier(notifier_params)
         try:
             await notifier.notify_critical("Configuration error", str(exc))
         finally:
             await notifier.close()
         return RuntimeBootResult(exit_code=2, reason="config_error")
-
-    runtime_cfg = ServerRuntimeConfig.from_params(app_config.params)
     notifier = await _build_notifier(app_config.params)
     registry = InstrumentRegistry.from_config(app_config)
     store = MemoryCandleStore(history_depth=app_config.history_depth)
