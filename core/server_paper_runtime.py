@@ -1102,3 +1102,10 @@ def _with_portfolio_risk_snapshot(
         },
     }
     return payload
+
+
+def _as_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
