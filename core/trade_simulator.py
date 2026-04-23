@@ -9,6 +9,7 @@ import math
 from typing import Any
 from uuid import uuid4
 
+from core.bool_parser import to_bool
 from core.lifecycle_policy import BaseLifecyclePolicy, LifecycleCloseAction, build_lifecycle_policy
 from core.market_data import Candle
 from core.models import Position, SignalDirection, StrategySignal, Trade
@@ -108,17 +109,21 @@ class TradeSimulator:
         self._tp1_size = float(sim_cfg.get("tp1_size", 0.5))
         self._max_wait_bars = int(sim_cfg.get("max_wait_bars", 6))
         self._max_trade_bars = int(sim_cfg.get("max_trade_bars", 20))
-        self._move_stop_to_breakeven = bool(sim_cfg.get("move_stop_to_breakeven", True))
-        self._close_active_on_blackout = bool(sim_cfg.get("close_active_on_blackout", False))
+        self._move_stop_to_breakeven = to_bool(sim_cfg.get("move_stop_to_breakeven", True), default=True)
+        self._close_active_on_blackout = to_bool(
+            sim_cfg.get("close_active_on_blackout", False),
+            default=False,
+        )
         self._fill_model = _parse_fill_model(execution_cfg=execution_cfg, sim_cfg=sim_cfg)
         self._intrabar_stop_priority = _parse_intrabar_conflict_policy(
             execution_cfg=execution_cfg,
             sim_cfg=sim_cfg,
         )
-        self._close_profitable_on_session_end = bool(
-            sim_cfg.get("close_profitable_on_session_end", False)
+        self._close_profitable_on_session_end = to_bool(
+            sim_cfg.get("close_profitable_on_session_end", False),
+            default=False,
         )
-        self._revalidate_after_fill = bool(sim_cfg.get("revalidate_after_fill", True))
+        self._revalidate_after_fill = to_bool(sim_cfg.get("revalidate_after_fill", True), default=True)
         self._min_rr_after_fill = float(sim_cfg.get("min_rr_after_fill", 0.50))
         self._min_expected_edge_after_fees = float(
             sim_cfg.get("min_expected_edge_after_fees", 0.0)
@@ -1044,13 +1049,13 @@ def _parse_fill_model(*, execution_cfg: dict[str, Any], sim_cfg: dict[str, Any])
 def _parse_intrabar_conflict_policy(*, execution_cfg: dict[str, Any], sim_cfg: dict[str, Any]) -> bool:
     raw = execution_cfg.get("intrabar_conflict_policy")
     if raw is None:
-        return bool(sim_cfg.get("intrabar_stop_priority", True))
+        return to_bool(sim_cfg.get("intrabar_stop_priority", True), default=True)
     normalized = str(raw).strip().lower()
     if normalized in {"pessimistic_stop_priority", "stop_priority", "conservative"}:
         return True
     if normalized in {"optimistic_target_priority", "target_priority"}:
         return False
-    return bool(sim_cfg.get("intrabar_stop_priority", True))
+    return to_bool(sim_cfg.get("intrabar_stop_priority", True), default=True)
 
 
 def _as_float(value: Any, default: float) -> float:
@@ -1061,16 +1066,7 @@ def _as_float(value: Any, default: float) -> float:
 
 
 def _as_bool(value: Any, *, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
+    return to_bool(value, default=default)
 
 
 def _extract_position_qty(metadata: dict[str, Any]) -> float:

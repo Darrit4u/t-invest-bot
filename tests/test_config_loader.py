@@ -232,6 +232,55 @@ class ConfigLoaderTests(unittest.TestCase):
                         ConfigLoader(root).load()
                     self.assertIn("session_rules.A.end", str(exc_ctx.exception))
 
+    def test_instrument_enabled_supports_string_bool_values(self) -> None:
+        cases = (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            ("yes", True),
+            ("no", False),
+            ("on", True),
+            ("off", False),
+        )
+        for raw_enabled, expected in cases:
+            with self.subTest(raw_enabled=raw_enabled):
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    (root / "instruments.yaml").write_text(
+                        f"""
+                        history_depth: 100
+                        default_timeframe: "1min"
+                        session_rules:
+                          A:
+                            timezone: "UTC"
+                            start: "00:00"
+                            end: "23:59"
+                        instruments:
+                          ES:
+                            enabled: "{raw_enabled}"
+                            tick_size: 0.25
+                            tick_value: 12.5
+                            lot: 1
+                            sessions: [A]
+                          BRENT:
+                            enabled: true
+                            tick_size: 0.01
+                            tick_value: 10.0
+                            lot: 1
+                            sessions: [A]
+                        """,
+                        encoding="utf-8",
+                    )
+                    (root / "strategies.yaml").write_text(
+                        "strategies:\n  ES: [trend_pullback_vwap_ema]\n  BRENT: [compression_breakout]\n",
+                        encoding="utf-8",
+                    )
+                    (root / "params.yaml").write_text("{}\n", encoding="utf-8")
+
+                    cfg = ConfigLoader(root).load()
+                    self.assertEqual(cfg.instruments["ES"].enabled, expected)
+
 
 if __name__ == "__main__":
     unittest.main()

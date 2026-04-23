@@ -18,6 +18,38 @@ class TradeSimulatorUnitTests(unittest.TestCase):
     def setUp(self) -> None:
         self.sim = TradeSimulator(params={"trade_simulator": {}}, logger=_DummyLogger(), storage=None)
 
+    def test_trade_simulator_parses_string_bool_flags(self) -> None:
+        cases = (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            ("yes", True),
+            ("no", False),
+            ("on", True),
+            ("off", False),
+        )
+        for raw_value, expected in cases:
+            with self.subTest(raw_value=raw_value):
+                sim = TradeSimulator(
+                    params={
+                        "trade_simulator": {
+                            "move_stop_to_breakeven": raw_value,
+                            "close_active_on_blackout": raw_value,
+                            "close_profitable_on_session_end": raw_value,
+                            "revalidate_after_fill": raw_value,
+                            "intrabar_stop_priority": raw_value,
+                        }
+                    },
+                    logger=_DummyLogger(),
+                    storage=None,
+                )
+                self.assertEqual(sim._move_stop_to_breakeven, expected)  # type: ignore[attr-defined]
+                self.assertEqual(sim._close_active_on_blackout, expected)  # type: ignore[attr-defined]
+                self.assertEqual(sim._close_profitable_on_session_end, expected)  # type: ignore[attr-defined]
+                self.assertEqual(sim._revalidate_after_fill, expected)  # type: ignore[attr-defined]
+                self.assertEqual(sim._intrabar_stop_priority, expected)  # type: ignore[attr-defined]
+
     def test_long_trade_hits_tp1_then_tp2_with_fees(self) -> None:
         signal = build_signal(
             regime=MarketRegime.TREND,

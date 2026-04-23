@@ -34,6 +34,43 @@ class _DummyLogger:
 
 
 class TelegramNotifierTests(unittest.IsolatedAsyncioTestCase):
+    def test_config_from_sources_parses_string_bool_values(self) -> None:
+        cases = (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            ("yes", True),
+            ("no", False),
+            ("on", True),
+            ("off", False),
+        )
+        for raw_value, expected in cases:
+            with self.subTest(raw_value=raw_value):
+                config = TelegramConfig.from_sources(
+                    env={"TELEGRAM_BOT_TOKEN": "x", "TELEGRAM_CHAT_ID": "1"},
+                    params={
+                        "telegram": {
+                            "enabled": raw_value,
+                            "send_startup_message": raw_value,
+                            "send_shutdown_summary": raw_value,
+                            "send_signals": raw_value,
+                            "send_positions": raw_value,
+                            "send_daily_report": raw_value,
+                            "send_heartbeat": raw_value,
+                            "send_errors": raw_value,
+                        }
+                    },
+                )
+                self.assertEqual(config.enabled, expected)
+                self.assertEqual(config.send_startup_message, expected)
+                self.assertEqual(config.send_shutdown_summary, expected)
+                self.assertEqual(config.send_signals, expected)
+                self.assertEqual(config.send_positions, expected)
+                self.assertEqual(config.send_daily_report, expected)
+                self.assertEqual(config.send_heartbeat, expected)
+                self.assertEqual(config.send_errors, expected)
+
     async def test_send_failures_do_not_raise_and_notifier_closes_cleanly(self) -> None:
         config = TelegramConfig(
             enabled=True,

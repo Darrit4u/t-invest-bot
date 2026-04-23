@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib import error, request
 
+from core.bool_parser import to_bool
 from core.models import StrategySignal, Trade
 from core.portfolio_events import PortfolioEvent
 
@@ -38,7 +39,7 @@ class TelegramConfig:
     def from_sources(cls, *, env: dict[str, str], params: dict[str, Any]) -> "TelegramConfig":
         section = params.get("telegram", {}) if isinstance(params.get("telegram", {}), dict) else {}
 
-        enabled = bool(section.get("enabled", True))
+        enabled = to_bool(section.get("enabled", True), default=True)
         bot_token = str(env.get("TELEGRAM_BOT_TOKEN", "")).strip()
         chat_id = str(env.get("TELEGRAM_CHAT_ID", "")).strip()
 
@@ -51,13 +52,13 @@ class TelegramConfig:
             request_timeout_seconds=max(1.0, float(section.get("request_timeout_seconds", 10.0))),
             queue_maxsize=max(10, int(section.get("queue_maxsize", 200))),
             summary_interval_seconds=max(0, int(section.get("summary_interval_seconds", 0))),
-            send_startup_message=bool(section.get("send_startup_message", True)),
-            send_shutdown_summary=bool(section.get("send_shutdown_summary", True)),
-            send_signals=_as_bool(section.get("send_signals", True), default=True),
-            send_positions=_as_bool(section.get("send_positions", True), default=True),
-            send_daily_report=_as_bool(section.get("send_daily_report", True), default=True),
-            send_heartbeat=_as_bool(section.get("send_heartbeat", True), default=True),
-            send_errors=_as_bool(section.get("send_errors", True), default=True),
+            send_startup_message=to_bool(section.get("send_startup_message", True), default=True),
+            send_shutdown_summary=to_bool(section.get("send_shutdown_summary", True), default=True),
+            send_signals=to_bool(section.get("send_signals", True), default=True),
+            send_positions=to_bool(section.get("send_positions", True), default=True),
+            send_daily_report=to_bool(section.get("send_daily_report", True), default=True),
+            send_heartbeat=to_bool(section.get("send_heartbeat", True), default=True),
+            send_errors=to_bool(section.get("send_errors", True), default=True),
         )
 
 
@@ -233,20 +234,6 @@ def _post_json(url: str, payload: dict[str, Any], timeout_seconds: float) -> tup
         return int(getattr(exc, "code", 0)), body, None
     except Exception as exc:
         return 0, "", str(exc)
-
-
-def _as_bool(value: Any, *, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
-
 
 def _format_signal_message(signal: StrategySignal) -> str:
     return (

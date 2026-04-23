@@ -6,6 +6,7 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from core.bool_parser import to_bool
 from core.models import MarketRegime, MarketRegimeState, SignalDecision, StrategyContext, StrategySignal
 from core.post_fill_validation import (
     PostFillValidationConfig,
@@ -140,7 +141,7 @@ class SignalFilterPipeline:
         reason_codes: list[str] = []
         if timing_reason is not None:
             reason_codes.append(timing_reason)
-        if bool(signal.metadata.get("late_trend_flag", False)):
+        if to_bool(signal.metadata.get("late_trend_flag", False), default=False):
             reason_codes.append("late_move")
 
         if signal_quality_score < self._min_signal_quality_score:
@@ -341,13 +342,4 @@ def _days(value: int):
 
 
 def _to_bool(value: Any, *, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    normalized = str(value).strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
-        return True
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return default
+    return to_bool(value, default=default)

@@ -178,6 +178,38 @@ class SignalFilterPipelineTests(unittest.TestCase):
         self.assertFalse(decision.accepted)
         self.assertEqual(decision.reason, "near_expiry_block")
 
+    def test_late_trend_flag_string_values_are_parsed_as_bool(self) -> None:
+        pipeline = SignalFilterPipeline(params={})
+        ctx = self._base_context()
+        base_signal = build_signal(
+            strategy="trend_pullback_vwap_ema",
+            regime=MarketRegime.TREND,
+            direction=SignalDirection.LONG,
+            entry=100.0,
+            stop_loss=99.0,
+            tp1=101.0,
+            tp2=102.0,
+        )
+        cases = (
+            ("true", True),
+            ("false", False),
+            ("1", True),
+            ("0", False),
+            ("yes", True),
+            ("no", False),
+            ("on", True),
+            ("off", False),
+        )
+        for raw_value, expected_flag in cases:
+            with self.subTest(raw_value=raw_value):
+                signal = replace(
+                    base_signal,
+                    metadata=dict(base_signal.metadata) | {"late_trend_flag": raw_value},
+                )
+                decision = pipeline.evaluate(signal, ctx)
+                self.assertTrue(decision.accepted)
+                self.assertEqual("late_move" in decision.reason_codes, expected_flag)
+
 
 if __name__ == "__main__":
     unittest.main()

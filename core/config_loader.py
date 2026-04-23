@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 import yaml
 
+from core.bool_parser import to_bool
 from core.timeframes import supported_timeframes
 
 
@@ -195,7 +196,7 @@ class ConfigLoader:
 
             instruments[symbol] = InstrumentConfig(
                 symbol=symbol,
-                enabled=bool(row.get("enabled", True)),
+                enabled=to_bool(row.get("enabled", True), default=True),
                 uid=self._optional_string(row.get("uid")),
                 figi=self._optional_string(row.get("figi")),
                 ticker=self._optional_string(row.get("ticker", symbol)),
