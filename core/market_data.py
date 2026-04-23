@@ -7,6 +7,7 @@ import importlib
 import logging
 import random
 import contextlib
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,13 +61,21 @@ class Candle:
         if not timeframe:
             raise CandleValidationError("timeframe must not be empty")
 
-        values = {
-            "open": float(open_),
-            "high": float(high),
-            "low": float(low),
-            "close": float(close),
-            "volume": float(volume),
-        }
+        values: dict[str, float] = {}
+        for field_name, raw_value in (
+            ("open", open_),
+            ("high", high),
+            ("low", low),
+            ("close", close),
+            ("volume", volume),
+        ):
+            try:
+                numeric = float(raw_value)
+            except (TypeError, ValueError) as exc:
+                raise CandleValidationError(f"{field_name} must be a finite number") from exc
+            if not math.isfinite(numeric):
+                raise CandleValidationError(f"{field_name} must be a finite number")
+            values[field_name] = numeric
 
         if values["volume"] < 0:
             raise CandleValidationError("volume must be >= 0")
