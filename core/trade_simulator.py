@@ -591,8 +591,9 @@ class TradeSimulator:
     def _refresh_performance_metrics(self, trade: TradeState) -> None:
         trade.net_pnl = trade.gross_pnl - trade.fees_paid
         reference_entry = trade.entry_fill_price if trade.entry_fill_price is not None else trade.entry
-        risk = abs(reference_entry - trade.stop_loss)
-        trade.r_multiple = trade.net_pnl / max(risk, 1e-9)
+        risk_per_contract = abs(reference_entry - trade.stop_loss)
+        total_position_risk = risk_per_contract * max(float(trade.quantity), 1e-9)
+        trade.r_multiple = trade.net_pnl / max(total_position_risk, 1e-9)
 
     def _would_close_in_profit(self, *, trade: TradeState, price: float) -> bool:
         if trade.entry_fill_price is None or trade.remaining_qty <= 0:
