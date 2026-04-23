@@ -162,6 +162,76 @@ class ConfigLoaderTests(unittest.TestCase):
             cfg = ConfigLoader(root).load()
             self.assertEqual(cfg.default_timeframe, "4hour")
 
+    def test_invalid_session_start_time_fails_fast(self) -> None:
+        invalid_values = ("99:99", "24:00", "bad-time")
+        for raw_start in invalid_values:
+            with self.subTest(raw_start=raw_start):
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    (root / "instruments.yaml").write_text(
+                        f"""
+                        history_depth: 100
+                        default_timeframe: "1min"
+                        session_rules:
+                          A:
+                            timezone: "UTC"
+                            start: "{raw_start}"
+                            end: "23:59"
+                        instruments:
+                          ES:
+                            enabled: true
+                            tick_size: 0.25
+                            tick_value: 12.5
+                            lot: 1
+                            sessions: [A]
+                        """,
+                        encoding="utf-8",
+                    )
+                    (root / "strategies.yaml").write_text(
+                        "strategies:\n  ES: [trend_pullback_vwap_ema]\n",
+                        encoding="utf-8",
+                    )
+                    (root / "params.yaml").write_text("{}\n", encoding="utf-8")
+
+                    with self.assertRaises(ConfigError) as exc_ctx:
+                        ConfigLoader(root).load()
+                    self.assertIn("session_rules.A.start", str(exc_ctx.exception))
+
+    def test_invalid_session_end_time_fails_fast(self) -> None:
+        invalid_values = ("99:99", "24:00", "garbage")
+        for raw_end in invalid_values:
+            with self.subTest(raw_end=raw_end):
+                with tempfile.TemporaryDirectory() as td:
+                    root = Path(td)
+                    (root / "instruments.yaml").write_text(
+                        f"""
+                        history_depth: 100
+                        default_timeframe: "1min"
+                        session_rules:
+                          A:
+                            timezone: "UTC"
+                            start: "00:00"
+                            end: "{raw_end}"
+                        instruments:
+                          ES:
+                            enabled: true
+                            tick_size: 0.25
+                            tick_value: 12.5
+                            lot: 1
+                            sessions: [A]
+                        """,
+                        encoding="utf-8",
+                    )
+                    (root / "strategies.yaml").write_text(
+                        "strategies:\n  ES: [trend_pullback_vwap_ema]\n",
+                        encoding="utf-8",
+                    )
+                    (root / "params.yaml").write_text("{}\n", encoding="utf-8")
+
+                    with self.assertRaises(ConfigError) as exc_ctx:
+                        ConfigLoader(root).load()
+                    self.assertIn("session_rules.A.end", str(exc_ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

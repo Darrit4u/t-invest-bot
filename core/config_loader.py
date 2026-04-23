@@ -145,6 +145,8 @@ class ConfigLoader:
             timezone = str(rule.get("timezone", "Europe/Moscow")).strip()
             if not start or not end:
                 raise ConfigError(f"session_rules.{name} must include start and end")
+            self._validate_session_time(start, field=f"session_rules.{name}.start")
+            self._validate_session_time(end, field=f"session_rules.{name}.end")
 
             try:
                 ZoneInfo(timezone)
@@ -285,4 +287,15 @@ class ConfigLoader:
             return None
         normalized = str(value).strip()
         return normalized or None
+
+    @staticmethod
+    def _validate_session_time(value: str, *, field: str) -> None:
+        patterns = ("%H:%M", "%H:%M:%S")
+        for pattern in patterns:
+            try:
+                datetime.strptime(value, pattern)
+                return
+            except ValueError:
+                continue
+        raise ConfigError(f"Invalid time in {field}: {value!r}. Use HH:MM or HH:MM:SS")
 
